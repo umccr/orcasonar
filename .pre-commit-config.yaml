@@ -1,0 +1,35 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        exclude: ^(pnpm-lock.yaml)
+      - id: check-yaml
+      - id: detect-aws-credentials
+        args: [--allow-missing-credentials]
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+      - id: no-commit-to-branch
+        args: [--branch, main, --branch, master, --pattern, release/.*]
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        exclude: pnpm-lock.yaml
+
+  - repo: local
+    hooks:
+      - id: eslint
+        name: ESLint
+        entry: pnpm lint
+        language: system
+        pass_filenames: false
+        files: \.(m|c)?[jt]sx?$
+      - id: prettier
+        name: prettier Format
+        entry: pnpm prettier
+        language: system
+        pass_filenames: false

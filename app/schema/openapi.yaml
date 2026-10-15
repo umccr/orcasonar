@@ -1,0 +1,218 @@
+openapi: 3.1.0
+info:
+  title: OrcaSonar API
+  version: 1.0.0
+  description: |
+    Answers and search over UMCCR documentation. Every endpoint except `/health` needs a Cognito ID token from an
+    allowed app client, sent as `Authorization: Bearer <token>`. Errors share one shape: `{"error": {"code", "message",
+    "retryAfter"?}}`. Answers and sources are plain text; clients must not render them as HTML.
+servers:
+  - url: https://sonar.prod.umccr.org/api/v1
+  - url: https://sonar.dev.umccr.org/api/v1
+security:
+  - cognitoIdToken: []
+paths:
+  /chat:
+    post:
+      summary: Answer a question from the documentation
+      description: |
+        With `Accept: text/event-stream` the answer streams as server-sent events, in this order: `meta`
+        (`{exchangeId, conversationId}`), `delta` (`{text}`, repeated), `citations` (an array of sources), `done`
+        (`{usage}`). An `error` event (`{code, message}`) ends the stream early. Otherwise the response is one JSON
+        object. Pass `conversationId` from a previous answer to ask a follow-up.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatRequest' }
+      responses:
+        '200':
+          description: The answer
+          content:
+            text/event-stream:
+              schema: { type: string }
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatResponse' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/TooMany' }
+        '503': { $ref: '#/components/responses/Error' }
+  /search:
+    post:
+      summary: Find passages, without writing an answer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SearchRequest' }
+      responses:
+        '200':
+          description: The best-matching passages
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    items: { $ref: '#/components/schemas/Source' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '429': { $ref: '#/components/responses/TooMany' }
+  /documents/{id}:
+    get:
+      summary: A document as the docs platform exported it
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: A citation's `id`, `<site>:<path>`, URL-encoded (for example `platform%3Aonboarding`).
+          schema: { type: string }
+      responses:
+        '200':
+          description: The document
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Document' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /feedback:
+    post:
+      summary: Rate an answer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FeedbackRequest' }
+      responses:
+        '204': { description: Recorded }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+  /health:
+    get:
+      summary: Whether the API is up. Needs no token; answered by API Gateway, not a function.
+      security: []
+      responses:
+        '200':
+          description: Up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status, version, stage]
+                properties:
+                  status: { type: string, enum: [ok] }
+                  version: { type: string, description: 'The deployed commit, short SHA' }
+                  stage: { type: string, enum: [beta, gamma, prod] }
+components:
+  securitySchemes:
+    cognitoIdToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: A Cognito ID token from the data-portal user pool, issued to an allowed app client.
+  responses:
+    Error:
+      description: An error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    TooMany:
+      description: Over today's allowance (`over-budget`) or too many requests (`throttled`)
+      headers:
+        Retry-After:
+          description: Seconds until a retry can succeed
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+  schemas:
+    Sites:
+      description: Limit to these docs sites (slugs); every site when absent.
+      type: array
+      minItems: 1
+      maxItems: 20
+      items: { type: string, pattern: '^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$' }
+    ChatRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string, minLength: 1, maxLength: 2000 }
+        conversationId: { type: string, pattern: '^c_[0-9a-f]{32}$' }
+        sites: { $ref: '#/components/schemas/Sites' }
+        mode: { type: string, enum: [ask], default: ask }
+    ChatResponse:
+      type: object
+      required: [exchangeId, conversationId, answer, citations, usage]
+      properties:
+        exchangeId: { type: string, pattern: '^x_[0-9a-f]{32}$' }
+        conversationId: { type: string, pattern: '^c_[0-9a-f]{32}$' }
+        answer: { type: string }
+        citations:
+          type: array
+          items: { $ref: '#/components/schemas/Source' }
+        usage: { $ref: '#/components/schemas/Usage' }
+    SearchRequest:
+      type: object
+      required: [query]
+      properties:
+        query: { type: string, minLength: 1, maxLength: 2000 }
+        topK: { type: integer, minimum: 1, maximum: 20, default: 8 }
+        sites: { $ref: '#/components/schemas/Sites' }
+    FeedbackRequest:
+      type: object
+      required: [exchangeId, rating]
+      properties:
+        exchangeId: { type: string, pattern: '^x_[0-9a-f]{32}$' }
+        rating: { type: string, enum: [up, down] }
+        comment: { type: string, maxLength: 1000 }
+    Source:
+      type: object
+      required: [id, title, url, site, snippet, score]
+      properties:
+        id: { type: string, description: '`<site>:<path>`, usable with /documents/{id}' }
+        title: { type: string }
+        url: { type: string, format: uri }
+        site: { type: string }
+        snippet: { type: string }
+        score: { type: number }
+    Document:
+      type: object
+      required: [id, site, title, url, updated, markdown]
+      properties:
+        id: { type: string }
+        site: { type: string }
+        title: { type: string }
+        url: { type: string }
+        updated: { type: string }
+        markdown: { type: string }
+    Usage:
+      type: object
+      required: [inputTokens, outputTokens]
+      properties:
+        inputTokens: { type: integer }
+        outputTokens: { type: integer }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum:
+                - invalid-request
+                - unauthorized
+                - forbidden
+                - not-found
+                - over-budget
+                - throttled
+                - unavailable
+                - internal
+            message: { type: string }
+            retryAfter: { type: integer }

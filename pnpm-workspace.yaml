@@ -1,0 +1,15 @@
+packages:
+  - app
+
+# Dependency build scripts are not needed for tests, synth or bundling (esbuild ships a platform binary package).
+allowBuilds:
+  '@parcel/watcher': false
+  esbuild: false
+  unrs-resolver: false
+
+# sprintf-js (GHSA-hp3w-g68c-fv3c, moderate, denial of service) has no patched version. It reaches only the test
+# tooling, through jest's coverage plugin (babel-plugin-istanbul > js-yaml 3 > argparse 1), never shipped code. Remove
+# this once a patched version or a jest without that path exists.
+auditConfig:
+  ignoreGhsas:
+    - GHSA-hp3w-g68c-fv3c
