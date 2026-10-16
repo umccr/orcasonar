@@ -34,3 +34,20 @@ export class ApiError extends Error {
 }
 
 export const invalidRequest = (message: string) => new ApiError(400, 'invalid-request', message);
+
+/**
+ * An unexpected error, for the logs only: its name and the start of its message, so an operator can see which call
+ * failed and why (an AWS error names the action and the resource it refused). Any text given in `remove`, such as
+ * the question, is cut out, so a message that echoes it never reaches the logs. Clients never see this.
+ */
+export const errorDetail = (error: unknown, remove: string[] = []): Record<string, string> => {
+  if (!(error instanceof Error)) {
+    return { error: 'unknown' };
+  }
+  // Cut out before shortening: shortening first could leave the start of a long question, which no longer matches.
+  let detail = error.message;
+  for (const text of remove.filter(Boolean)) {
+    detail = detail.split(text).join('[removed]');
+  }
+  return { error: error.name, detail: detail.slice(0, 500) };
+};

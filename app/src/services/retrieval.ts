@@ -25,8 +25,20 @@ export const ANSWER_PASSAGES = 8;
 /** Citations and search results quote this much of a passage. */
 export const SNIPPET_CHARACTERS = 280;
 
+/**
+ * A passage's Markdown as plain text, for quoting on one line: a link's text without its target, and no heading, quote,
+ * bold, strikethrough, code or table marks. Single `*` and `_` stay: they are as often part of a name as emphasis.
+ */
+export const plainText = (markdown: string): string =>
+  markdown
+    .replace(/!?\[([^\]\n]*)\]\([^)\n]*\)/g, '$1')
+    .replace(/^ {0,3}(?:#{1,6}[ \t]+|>[ \t]?)/gm, '')
+    .replace(/^[ \t]*\|?[ \t]*:?-{3,}:?[ \t]*(?:\|[ \t]*:?-{3,}:?[ \t]*)*\|?[ \t]*$/gm, '')
+    .replace(/\*\*|~~|`+/g, '')
+    .replace(/\|/g, ' ');
+
 export const snippet = (text: string): string => {
-  const flat = text.replace(/\s+/g, ' ').trim();
+  const flat = plainText(text).replace(/\s+/g, ' ').trim();
   return flat.length <= SNIPPET_CHARACTERS ? flat : `${flat.slice(0, SNIPPET_CHARACTERS - 1)}…`;
 };
 
@@ -39,3 +51,6 @@ export const toSource = (passage: Passage) => ({
   snippet: snippet(passage.text),
   score: Math.round(passage.score * 1000) / 1000,
 });
+
+/** A passage the answer cites: its source, with the number the answer cites it by, as in `[2]`. */
+export const toCitation = (passage: Passage, ref: number) => ({ ...toSource(passage), ref });

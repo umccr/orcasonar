@@ -1,6 +1,7 @@
 import { ApiError } from '../lib/errors';
 import { MemorySpendStore } from '../testing/fakes';
-import { allowance, Budget, spendKeys } from './budget';
+import type { Hold } from './budget';
+import { allowance, ANSWER_HOLD_USD, Budget, spendKeys } from './budget';
 
 const limits = { monthlyUsd: 50, callerDailyUsd: 0.4 };
 // 12 October in Melbourne: 20 days left in October, today included.
@@ -34,26 +35,72 @@ describe('allowance', () => {
 });
 
 describe('Budget', () => {
-  test('records spend per caller, per day and per month', async () => {
+  test('holds the most an answer can cost, then settles it at the cost', async () => {
     const store = new MemorySpendStore();
     const budget = new Budget(store, limits, () => now);
-    await budget.record('reader-1', 0.02);
-    await budget.record('reader-1', 0.03);
-    const spent = await store.spent(spendKeys('reader-1', now));
-    expect(spent.caller).toBeCloseTo(0.05);
-    expect(spent.day).toBeCloseTo(0.05);
-    expect(spent.month).toBeCloseTo(0.05);
+    const hold = await budget.reserve('reader-1');
+    expect(await store.spent(spendKeys('reader-1', now))).toEqual({
+      month: ANSWER_HOLD_USD,
+      day: ANSWER_HOLD_USD,
+      caller: ANSWER_HOLD_USD,
+    });
+
+    await budget.settle(hold, 0.02);
+    expect(await store.spent(spendKeys('reader-1', now))).toEqual({
+      month: 0.02,
+      day: 0.02,
+      caller: 0.02,
+    });
     expect((await store.spent(spendKeys('reader-2', now))).caller).toBe(0);
+  });
+
+  test('settles on the day the hold was taken, even after midnight', async () => {
+    const store = new MemorySpendStore();
+    let clock = now;
+    const budget = new Budget(store, limits, () => clock);
+    const hold = await budget.reserve('reader-1');
+    clock = new Date('2026-10-12T14:00:00Z'); // 1 am on 13 October in Melbourne
+    await budget.settle(hold, 0.03);
+    expect((await store.spent(spendKeys('reader-1', now))).caller).toBe(0.03);
+    expect((await store.spent(spendKeys('reader-1', clock))).caller).toBe(0);
   });
 
   test('throws 429 with the seconds until midnight', async () => {
     const store = new MemorySpendStore();
     const budget = new Budget(store, limits, () => now);
-    await budget.record('reader-1', 0.41);
-    const error = await budget.ensure('reader-1').catch((caught: unknown) => caught);
+    await store.add(spendKeys('reader-1', now), 0.41);
+    const error = await budget.reserve('reader-1').catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(ApiError);
     expect(error).toMatchObject({ status: 429, code: 'over-budget' });
     expect((error as ApiError).retryAfter).toBeGreaterThan(0);
-    await expect(budget.ensure('reader-2')).resolves.toMatchObject({ allowed: true });
+    await expect(budget.reserve('reader-2')).resolves.toMatchObject({ usd: ANSWER_HOLD_USD });
+  });
+
+  test('counts answers in flight against the cap, so concurrent requests cannot all pass', async () => {
+    const store = new MemorySpendStore();
+    const budget = new Budget(store, limits, () => now);
+    // $0.40 a day, held $0.10 at a time: four answers at once, then a refusal until one settles.
+    const results = await Promise.allSettled([1, 2, 3, 4, 5].map(() => budget.reserve('reader-1')));
+    expect(results.map((result) => result.status)).toEqual([
+      'fulfilled',
+      'fulfilled',
+      'fulfilled',
+      'fulfilled',
+      'rejected',
+    ]);
+    const first = results[0] as PromiseFulfilledResult<Hold>;
+    await budget.settle(first.value, 0.02);
+    await expect(budget.reserve('reader-1')).resolves.toBeDefined();
+  });
+
+  test("refuses everyone once answers in flight reach the team's allowance", async () => {
+    const store = new MemorySpendStore();
+    // $2.50 a day for the team: $50 over the 20 days left. One answer in flight takes it from $2.45 past that.
+    const budget = new Budget(store, limits, () => now);
+    await store.add(spendKeys('reader-0', now), 2.45);
+    await budget.reserve('reader-1');
+    const error = await budget.reserve('reader-2').catch((caught: unknown) => caught);
+    expect(error).toMatchObject({ status: 429, code: 'over-budget' });
+    expect((error as ApiError).message).toContain('for everyone');
   });
 });

@@ -10,8 +10,11 @@ import { daysLeftInMonth, localDate, localMonth, secondsUntilMidnight } from '..
  *   day for everyone.
  * - Both reset at midnight in Melbourne.
  *
- * Spend is recorded after each answer from the tokens actually used, so a caller can go slightly over a limit with
- * the answer that crosses it; the next request is refused.
+ * Before an answer, the most it can cost is held against the caller's and the team's spend, checked against both
+ * limits in the same write, so answers asked at the same moment, even on different Lambda instances, cannot all pass a
+ * check that each would pass alone. Once the answer's cost is known, from the tokens actually used, it replaces the
+ * hold; when it never becomes known (the model call failed part way), the hold stays as the cost. A caller can still
+ * go slightly over a limit with the answer that crosses it; the next request is refused.
  */
 
 export interface BudgetLimits {
@@ -32,14 +35,27 @@ export interface SpendKeys {
   readonly caller: string;
 }
 
+/** The limit that refused an answer. */
+export type OverBudget = 'caller' | 'team';
+
 export interface SpendStore {
   spent(keys: SpendKeys): Promise<Spend>;
+  /** Adds `usd`, which may be negative, to the month's, the day's and the caller's spend: all three, or none. */
   add(keys: SpendKeys, usd: number): Promise<void>;
+  /**
+   * Adds `usd` as `add` does, but only while the caller's spend is under `limits.caller` and the day's is under
+   * `limits.day`, checked in the same write. Returns the limit that refused it, if one did.
+   */
+  hold(
+    keys: SpendKeys,
+    usd: number,
+    limits: { readonly caller: number; readonly day: number }
+  ): Promise<OverBudget | null>;
 }
 
 export interface Allowance {
   readonly allowed: boolean;
-  readonly reason?: 'caller' | 'team';
+  readonly reason?: OverBudget;
   readonly teamDailyUsd: number;
   readonly spent: Spend;
   /** Seconds until midnight in Melbourne, when both limits reset. */
@@ -64,6 +80,18 @@ export const spendKeys = (callerId: string, now: Date): SpendKeys => {
   return { month: localMonth(now), day, caller: `${callerId}#${day}` };
 };
 
+/**
+ * What an answer is held at until its cost is known: more than the most expensive answer the per-request limits allow,
+ * about 8 cents (2,000 characters of question, six turns of history, eight passages and 1,000 output tokens).
+ */
+export const ANSWER_HOLD_USD = 0.1;
+
+/** Allowance held for one answer, until `Budget.settle` replaces it with what the answer cost. */
+export interface Hold {
+  readonly keys: SpendKeys;
+  readonly usd: number;
+}
+
 export class Budget {
   constructor(
     private readonly store: SpendStore,
@@ -71,26 +99,40 @@ export class Budget {
     private readonly clock: () => Date = () => new Date()
   ) {}
 
-  /** Throws `429 over-budget` when the caller or the team has used up today's allowance. */
-  async ensure(callerId: string): Promise<Allowance> {
+  /**
+   * Holds the most an answer can cost against today's allowance, the caller's and the team's, before any of it is
+   * spent. Throws `429 over-budget` when either is used up.
+   */
+  async reserve(callerId: string): Promise<Hold> {
     const now = this.clock();
-    const result = allowance(await this.store.spent(spendKeys(callerId, now)), this.limits, now);
-    if (!result.allowed) {
+    const keys = spendKeys(callerId, now);
+    const result = allowance(await this.store.spent(keys), this.limits, now);
+    // The team's limit can be checked on the day's spend alone: the month's spend less the day's is what was spent
+    // before today, which today's writes, adding to both, leave unchanged.
+    const refused = result.allowed
+      ? await this.store.hold(keys, ANSWER_HOLD_USD, {
+          caller: this.limits.callerDailyUsd,
+          day: result.teamDailyUsd,
+        })
+      : result.reason;
+    if (refused) {
       throw new ApiError(
         429,
         'over-budget',
-        result.reason === 'caller'
+        refused === 'caller'
           ? "You have used today's allowance for answers. It resets at midnight; Search still works."
           : "Today's allowance for answers is used up for everyone. It resets at midnight; Search still works.",
         result.retryAfter
       );
     }
-    return result;
+    return { keys, usd: ANSWER_HOLD_USD };
   }
 
-  async record(callerId: string, usd: number): Promise<void> {
-    if (usd > 0) {
-      await this.store.add(spendKeys(callerId, this.clock()), usd);
+  /** Replaces the hold with what the answer cost, on the day it was held. */
+  async settle(hold: Hold, usd: number): Promise<void> {
+    const difference = Math.round((usd - hold.usd) * 1_000_000) / 1_000_000;
+    if (difference !== 0) {
+      await this.store.add(hold.keys, difference);
     }
   }
 }

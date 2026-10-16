@@ -54,7 +54,7 @@ event: delta
 data: {"text":"Add one entry to the site registry"}
 
 event: citations
-data: [{"id":"platform:onboarding","title":"Onboarding a repository","url":"https://docs.umccr.org/platform/onboarding/","site":"platform","snippet":"…","score":0.82}]
+data: [{"id":"platform:onboarding","title":"Onboarding a repository","url":"https://docs.umccr.org/platform/onboarding/","site":"platform","snippet":"…","score":0.82,"ref":1}]
 
 event: done
 data: {"usage":{"inputTokens":4920,"outputTokens":388}}
@@ -64,7 +64,14 @@ data: {"usage":{"inputTokens":4920,"outputTokens":388}}
 error. Without the `Accept` header, the response is one JSON object with `exchangeId`, `conversationId`, `answer`,
 `citations` and `usage`.
 
-Answers, snippets and titles are plain text. Render them as text, never as HTML. Citation URLs point at
+Deltas arrive in bursts. The guardrail checks the answer about 1,000 characters at a time before releasing them, so a
+short answer often arrives at once, several seconds after the question. A client that wants the answer to appear as
+it is written should pace the text itself.
+
+The answer is Markdown: paragraphs, lists, emphasis, code, links and now and then a small table. `[n]` in it cites
+the citation whose `ref` is n; citations are listed in the order the answer first cites them, so `ref` is not their
+position. Render the answer with a Markdown renderer that builds elements and passes no raw HTML through, or show it
+as text; never insert it into a page as HTML. Titles and snippets are plain text. Citation URLs point at
 `docs.umccr.org`; a client on another docs host (dev, stg) should rewrite the origin to its own.
 
 ## Other endpoints
@@ -78,7 +85,8 @@ Answers, snippets and titles are plain text. Render them as text, never as HTML.
 
 ## Errors
 
-Every error has one shape: `{"error": {"code", "message", "retryAfter"?}}`.
+Every error has one shape: `{"error": {"code", "message", "retryAfter"?}}`, including those API Gateway returns
+itself, such as for a missing token, a request WAF blocked, throttling or an unknown endpoint.
 
 | Status | `code`            | When                                                                                                                |
 | ------ | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
@@ -88,7 +96,7 @@ Every error has one shape: `{"error": {"code", "message", "retryAfter"?}}`.
 | 404    | `not-found`       | no such document or endpoint                                                                                        |
 | 429    | `over-budget`     | the caller's or the team's allowance for today is used; `Retry-After` gives the seconds until midnight in Melbourne |
 | 429    | `throttled`       | too many requests per second                                                                                        |
-| 503    | `unavailable`     | Bedrock is throttling, or the answer stopped early                                                                  |
+| 503    | `unavailable`     | Bedrock is throttling, the answer stopped early, or too many answers were starting at once                          |
 
 ## Limits
 

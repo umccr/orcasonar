@@ -1,7 +1,7 @@
 import type { AppDeps } from '../app';
 import { ApiError } from '../lib/errors';
 import type { AnswerEvent, AnswerRequest, Answerer } from '../services/answer';
-import type { BudgetLimits, Spend, SpendKeys, SpendStore } from '../services/budget';
+import type { BudgetLimits, OverBudget, Spend, SpendKeys, SpendStore } from '../services/budget';
 import { Budget } from '../services/budget';
 import type { Turn } from '../services/prompt';
 import type { Passage, RetrieveOptions, Retriever } from '../services/retrieval';
@@ -29,8 +29,25 @@ export class MemorySpendStore implements SpendStore {
 
   async add(keys: SpendKeys, usd: number): Promise<void> {
     for (const key of [`month#${keys.month}`, `day#${keys.day}`, `caller#${keys.caller}`]) {
-      this.values.set(key, (this.values.get(key) ?? 0) + usd);
+      // Rounded as DynamoDB, which adds decimals exactly, would leave it.
+      this.values.set(key, Math.round(((this.values.get(key) ?? 0) + usd) * 1e9) / 1e9);
     }
+  }
+
+  /** Checks and adds without awaiting in between, so concurrent holds are atomic, as DynamoDB's are. */
+  async hold(
+    keys: SpendKeys,
+    usd: number,
+    limits: { readonly caller: number; readonly day: number }
+  ): Promise<OverBudget | null> {
+    if ((this.values.get(`caller#${keys.caller}`) ?? 0) >= limits.caller) {
+      return 'caller';
+    }
+    if ((this.values.get(`day#${keys.day}`) ?? 0) >= limits.day) {
+      return 'team';
+    }
+    await this.add(keys, usd);
+    return null;
   }
 }
 

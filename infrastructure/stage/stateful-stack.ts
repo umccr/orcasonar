@@ -1,5 +1,13 @@
 import { createHash } from 'crypto';
-import { Aws, CfnOutput, Duration, RemovalPolicy, Stack, StackProps } from 'aws-cdk-lib';
+import {
+  Aws,
+  CfnDeletionPolicy,
+  CfnOutput,
+  Duration,
+  RemovalPolicy,
+  Stack,
+  StackProps,
+} from 'aws-cdk-lib';
 import {
   CfnDataSource,
   CfnGuardrail,
@@ -240,11 +248,17 @@ export class OrcaSonarStatefulStack extends Stack {
               bucketOwnerAccountId: this.account,
             },
             filterConfiguration: { inclusionPrefixes: [DOCS_PREFIX] },
-            metadataFilesPrefix: DOCS_PREFIX,
+            // No metadataFilesPrefix: each page's `<page>.md.metadata.json` sits beside it, where the connector looks
+            // when none is set. With a prefix it looks for `<prefix><document key>.metadata.json`, so `docs/` sent it
+            // to `docs/docs/…`: it read no metadata, citations had no titles or links, and no page matched a `site`
+            // filter.
           },
         },
       },
     });
+    // The index is kept as the data is. The data source too: deleting it deletes what it indexed (DELETE above).
+    knowledgeBase.applyRemovalPolicy(props.removalPolicy);
+    dataSource.applyRemovalPolicy(props.removalPolicy);
 
     return {
       knowledgeBaseId: knowledgeBase.attrKnowledgeBaseId,
@@ -303,12 +317,15 @@ export class OrcaSonarStatefulStack extends Stack {
       ...policies,
     });
     // A guardrail version is immutable. Naming the policies' hash in its description makes CloudFormation publish a
-    // new version whenever the policies change, which the stateless stack then picks up through SSM.
+    // new version whenever the policies change, and its number in SSM, where the chat function reads it every few
+    // minutes. The version it replaces is kept: running functions use it until they read the new one, and the
+    // stateless stack names it until its next deploy. The runbook says how to delete old versions.
     const hash = createHash('sha256').update(JSON.stringify(policies)).digest('hex').slice(0, 12);
     const version = new CfnGuardrailVersion(this, 'GuardrailVersion', {
       guardrailIdentifier: guardrail.attrGuardrailId,
       description: `OrcaSonar guardrail policies ${hash}`,
     });
+    version.cfnOptions.updateReplacePolicy = CfnDeletionPolicy.RETAIN;
     return { guardrailId: guardrail.attrGuardrailId, version: version.attrVersion };
   }
 }

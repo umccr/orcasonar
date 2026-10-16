@@ -1,5 +1,8 @@
+import { readFileSync } from 'fs';
+import * as path from 'path';
 import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
+import { parse } from 'yaml';
 import { StageName } from '@orcabus/platform-cdk-constructs/shared-config/accounts';
 import { STAGE_ENVIRONMENTS } from '../infrastructure/environments';
 import {
@@ -7,7 +10,7 @@ import {
   getOrcaSonarStatefulStackProps,
   getOrcaSonarStatelessStackProps,
 } from '../infrastructure/stage/config';
-import { SSM_PARAMETERS } from '../infrastructure/stage/constants';
+import { APP_ROOT, SSM_PARAMETERS } from '../infrastructure/stage/constants';
 import { OrcaSonarStatefulStack } from '../infrastructure/stage/stateful-stack';
 import { OrcaSonarStatelessStack } from '../infrastructure/stage/stateless-stack';
 import {
@@ -98,7 +101,7 @@ describe('stateful stack', () => {
     });
   });
 
-  test('indexes the docs/ prefix of the ingest bucket through the managed S3 connector', () => {
+  test('indexes the docs/ prefix of the ingest bucket, with the metadata beside each page', () => {
     template.hasResourceProperties('AWS::Bedrock::DataSource', {
       Name: 'docs',
       DataDeletionPolicy: 'DELETE',
@@ -113,6 +116,8 @@ describe('stateful stack', () => {
               bucketOwnerAccountId: ENVIRONMENTS.PROD.account,
             },
             filterConfiguration: { inclusionPrefixes: ['docs/'] },
+            // A prefix would move where the connector looks for `<page>.md.metadata.json`, away from the page.
+            metadataFilesPrefix: Match.absent(),
           }),
         },
       },
@@ -149,12 +154,25 @@ describe('stateful stack', () => {
       DeletionProtectionEnabled: true,
       TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
     });
-    for (const type of ['AWS::S3::Bucket', 'AWS::DynamoDB::Table', 'AWS::KMS::Key']) {
+    for (const type of [
+      'AWS::S3::Bucket',
+      'AWS::DynamoDB::Table',
+      'AWS::KMS::Key',
+      'AWS::Bedrock::KnowledgeBase',
+      'AWS::Bedrock::DataSource',
+    ]) {
       template.hasResource(type, {
         DeletionPolicy: 'RetainExceptOnCreate',
         UpdateReplacePolicy: 'Retain',
       });
     }
+  });
+
+  // A chat function names the version it last read until it reads the new one.
+  test.each(STAGES)('%s keeps a guardrail version it replaces', (stage) => {
+    Template.fromStack(statefulStack(stage).stack).hasResource('AWS::Bedrock::GuardrailVersion', {
+      UpdateReplacePolicy: 'Retain',
+    });
   });
 
   // A failed first create must not leave orphans; the fixed table name and key alias would block the retry.
@@ -306,6 +324,98 @@ describe('stateless stack', () => {
       ActionType: 'APPLY_IAM_POLICY',
       ApprovalModel: 'AUTOMATIC',
     });
+  });
+
+  test('creates the budget, and the action role with its policy, before the budget action', () => {
+    const [budgetId] = Object.keys(template.findResources('AWS::Budgets::Budget'));
+    const [action] = Object.values(template.findResources('AWS::Budgets::BudgetsAction')) as {
+      Properties: { BudgetName: unknown };
+      DependsOn?: string[];
+    }[];
+    expect(action!.Properties.BudgetName).toEqual({ Ref: budgetId });
+    const rolePolicies = Object.keys(template.findResources('AWS::IAM::Policy')).filter((id) =>
+      id.startsWith('BudgetActionRoleDefaultPolicy')
+    );
+    expect(rolePolicies).toHaveLength(1);
+    expect(action!.DependsOn).toEqual(expect.arrayContaining(rolePolicies));
+  });
+
+  test('answers API Gateway errors in the API error shape, with CORS headers', () => {
+    const contract = parse(readFileSync(path.join(APP_ROOT, 'schema', 'openapi.yaml'), 'utf8')) as {
+      components: {
+        schemas: { Error: { properties: { error: { properties: { code: { enum: string[] } } } } } };
+      };
+    };
+    const codes = contract.components.schemas.Error.properties.error.properties.code.enum;
+    const responses = Object.values(template.findResources('AWS::ApiGateway::GatewayResponse')).map(
+      ({ Properties: response }) => {
+        const body = String(response.ResponseTemplates['application/json']).replace(
+          '$context.error.messageString',
+          '"Missing Authentication Token"'
+        );
+        return {
+          type: response.ResponseType as string,
+          status: response.StatusCode as string | undefined,
+          error: (JSON.parse(body) as { error: { code: string; message: string } }).error,
+          origin: response.ResponseParameters['gatewayresponse.header.Access-Control-Allow-Origin'],
+        };
+      }
+    );
+    expect(responses.map((response) => response.type).sort()).toEqual([
+      'ACCESS_DENIED',
+      'DEFAULT_4XX',
+      'DEFAULT_5XX',
+      'MISSING_AUTHENTICATION_TOKEN',
+      'THROTTLED',
+      'UNAUTHORIZED',
+      'WAF_FILTERED',
+    ]);
+    for (const response of responses) {
+      expect(codes).toContain(response.error.code);
+      expect(response.error.message).not.toBe('');
+      expect(response.origin).toBe('method.request.header.Origin');
+    }
+    const byType = Object.fromEntries(responses.map((response) => [response.type, response]));
+    expect(byType['UNAUTHORIZED']!.error.code).toBe('unauthorized');
+    expect(byType['WAF_FILTERED']!.error.code).toBe('forbidden');
+    expect(byType['THROTTLED']!.error.code).toBe('throttled');
+    expect(byType['MISSING_AUTHENTICATION_TOKEN']).toMatchObject({
+      status: '404',
+      error: { code: 'not-found' },
+    });
+  });
+
+  test('lets the chat function read the guardrail version as it changes', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          GUARDRAIL_VERSION_PARAMETER: SSM_PARAMETERS.guardrailVersion,
+        }),
+      },
+    });
+    const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(policies).toContain('ssm:GetParameter');
+    expect(policies).toContain(`:parameter${SSM_PARAMETERS.guardrailVersion}`);
+  });
+
+  test('follows each ingestion job, and raises an alarm when one fails', () => {
+    expect(JSON.stringify(template.findResources('AWS::IAM::Policy'))).toContain(
+      'bedrock:GetIngestionJob'
+    );
+    template.hasResourceProperties('AWS::Logs::MetricFilter', {
+      LogGroupName: { Ref: Match.stringLikeRegexp('^IngestRunFunctionLogGroup') },
+      FilterPattern: '{ $.outcome = "job-failed" }',
+      MetricTransformations: [
+        Match.objectLike({ MetricNamespace: 'OrcaSonar', MetricName: 'IngestionJobsFailed' }),
+      ],
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Namespace: 'OrcaSonar',
+      MetricName: 'IngestionJobsFailed',
+      Threshold: 1,
+    });
+    // The function's own log group, rather than one that a log retention function would create.
+    template.resourceCountIs('Custom::LogRetention', 0);
   });
 
   test('checks for changed documents every 15 minutes', () => {

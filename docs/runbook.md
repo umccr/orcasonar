@@ -34,9 +34,51 @@ every answer fails once the change deploys.
 
 - Check the ingestion jobs: `aws bedrock-agent list-ingestion-jobs --knowledge-base-id <id> --data-source-id <id>`.
   The IDs are in SSM under `/orcasonar/`.
-- Check the `IngestRunFunction` logs: `started`, `job-running`, or errors. `IngestErrorsAlarm` fires on repeated
-  errors.
-- To force a job: `aws bedrock-agent start-ingestion-job --knowledge-base-id <id> --data-source-id <id>`.
+- Check the `IngestRunFunction` logs: `started`, `job-running`, `job-complete`, `job-failed` with the job's failure
+  reasons, or errors. `IngestErrorsAlarm` fires on repeated errors, and `IngestJobsFailedAlarm` when a job fails. The
+  index stays marked stale until a job completes, so the next run starts another job; a failure that repeats, such as
+  missing permissions, needs fixing at its cause.
+- To force a job: `aws bedrock-agent start-ingestion-job --knowledge-base-id <id> --data-source-id <id>`. The
+  scheduler waits for it, then starts one of its own if the index is still marked stale.
+
+## Sources have no titles, or "This site only" finds nothing
+
+Both mean the index has no metadata: each passage's `site`, `title`, `url` and `doc_id` come from the page's
+`<page>.md.metadata.json`. Without them a source's link is empty, and a `site` filter matches no page, so every
+scoped question gets "I couldn't find this in UMCCR's documentation".
+
+- Check the last ingestion job: its `numberOfMetadataDocumentsScanned` should equal `numberOfDocumentsScanned`, one
+  metadata file per page. 0 means the connector read none.
+- Check a passage. Its `metadata` should hold `site`, `title`, `url` and `doc_id` beside the service's own `_` fields,
+  such as `_source_uri`:
+
+  ```sh
+  aws bedrock-agent-runtime retrieve --knowledge-base-id <id> --retrieval-query text=onboarding \
+    --retrieval-configuration '{"managedSearchConfiguration":{"numberOfResults":1}}' \
+    --query 'retrievalResults[0].metadata'
+  ```
+
+- The `docs` data source must have no `metadataFilesPrefix`. With one, the connector looks for
+  `<prefix><document key>.metadata.json` rather than beside the page. After changing the data source, force a job
+  (above): no change under `docs/` marks the index stale, and the job reads the metadata files it now finds.
+
+## Change the guardrail
+
+The guardrail's policies are in `infrastructure/stage/stateful-stack.ts`. A change publishes a new guardrail version
+through the stateful pipeline and writes its number to `/orcasonar/guardrail-version`. Chat functions read that
+parameter every five minutes, so they move to the new version without a deploy of the stateless stack.
+
+The version it replaces is kept rather than deleted: running functions use it until they read the parameter again,
+and the stateless stack names it as their fallback until its next deploy. Old versions do nothing, but they count
+towards the guardrail's quota of versions. Once the stateless stack has deployed since the change, delete the older
+ones:
+
+```sh
+aws bedrock list-guardrails --guardrail-identifier <id> --query 'guardrails[].version'
+aws bedrock delete-guardrail --guardrail-identifier <id> --guardrail-version <old version>
+```
+
+The guardrail's ID is in `/orcasonar/guardrail-id`.
 
 ## Remove a site's documents
 

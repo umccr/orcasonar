@@ -20,7 +20,7 @@ import {
 } from 'aws-cdk-lib/aws-apigateway';
 import { CfnBudget, CfnBudgetsAction } from 'aws-cdk-lib/aws-budgets';
 import { Certificate } from 'aws-cdk-lib/aws-certificatemanager';
-import { Alarm, ComparisonOperator, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
+import { Alarm, ComparisonOperator, Stats, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
 import { Table } from 'aws-cdk-lib/aws-dynamodb';
 import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
 import { LambdaFunction } from 'aws-cdk-lib/aws-events-targets';
@@ -35,7 +35,7 @@ import {
 import { Key } from 'aws-cdk-lib/aws-kms';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
-import { LogGroup, RetentionDays } from 'aws-cdk-lib/aws-logs';
+import { FilterPattern, LogGroup, MetricFilter, RetentionDays } from 'aws-cdk-lib/aws-logs';
 import { ARecord, HostedZone, RecordTarget } from 'aws-cdk-lib/aws-route53';
 import { ApiGatewayDomain } from 'aws-cdk-lib/aws-route53-targets';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
@@ -90,6 +90,53 @@ const NODE_RUNTIME = Runtime.NODEJS_24_X;
 
 /** API Gateway's limit on one mapping template. */
 const MAX_TEMPLATE_BYTES = 300 * 1024;
+
+const quoted = (text: string) => JSON.stringify(text);
+
+/**
+ * API Gateway's own errors, in the API's error shape, so that clients read their codes as they read the functions':
+ * a missing, expired or foreign token, WAF, throttling, and a route that does not exist (404, rather than API
+ * Gateway's 403 "Missing Authentication Token"). Messages are JSON; any other 4XX keeps API Gateway's own message,
+ * which `$context.error.messageString` gives already quoted.
+ */
+const GATEWAY_ERRORS: { type: ResponseType; code: string; message: string; status?: string }[] = [
+  {
+    type: ResponseType.UNAUTHORIZED,
+    code: 'unauthorized',
+    message: quoted('Sign in again to use OrcaSonar.'),
+  },
+  {
+    type: ResponseType.ACCESS_DENIED,
+    code: 'forbidden',
+    message: quoted('That sign-in cannot use OrcaSonar.'),
+  },
+  {
+    type: ResponseType.WAF_FILTERED,
+    code: 'forbidden',
+    message: quoted('The request was blocked.'),
+  },
+  {
+    type: ResponseType.THROTTLED,
+    code: 'throttled',
+    message: quoted('Too many requests. Try again shortly.'),
+  },
+  {
+    type: ResponseType.MISSING_AUTHENTICATION_TOKEN,
+    code: 'not-found',
+    message: quoted('No such endpoint.'),
+    status: '404',
+  },
+  {
+    type: ResponseType.DEFAULT_4XX,
+    code: 'invalid-request',
+    message: '$context.error.messageString',
+  },
+  {
+    type: ResponseType.DEFAULT_5XX,
+    code: 'internal',
+    message: quoted('Something went wrong. Try again.'),
+  },
+];
 
 /**
  * A GET that API Gateway answers itself, from a mock integration, with a fixed body and no token. The body goes through
@@ -199,6 +246,7 @@ export class OrcaSonarStatelessStack extends Stack {
         ...common,
         GUARDRAIL_ID: guardrailId,
         GUARDRAIL_VERSION: parameter(SSM_PARAMETERS.guardrailVersion),
+        GUARDRAIL_VERSION_PARAMETER: SSM_PARAMETERS.guardrailVersion,
         ANSWER_MODEL_ID: props.answerModelId,
         MONTHLY_BUDGET_USD: String(props.budget.monthlyUsd),
         CALLER_DAILY_USD: String(props.budget.callerDailyUsd),
@@ -223,6 +271,12 @@ export class OrcaSonarStatelessStack extends Stack {
         ],
       })
     );
+    // The guardrail's current version, read again every few minutes: a new version needs no deploy of this stack.
+    StringParameter.fromStringParameterName(
+      this,
+      'GuardrailVersionParameter',
+      SSM_PARAMETERS.guardrailVersion
+    ).grantRead(chat);
 
     const query = this.function('QueryFunction', 'query.ts', props, {
       timeout: Duration.seconds(29),
@@ -355,15 +409,18 @@ export class OrcaSonarStatelessStack extends Stack {
       },
     });
 
-    // API Gateway's own errors (401 from the authorizer, 403 from WAF, 429 throttling) need CORS headers too, or the
-    // browser hides them from the chat panel. They carry no data, so reflecting the origin is safe.
-    for (const type of [ResponseType.DEFAULT_4XX, ResponseType.DEFAULT_5XX]) {
+    // API Gateway's own errors need CORS headers too, or the browser hides them from the chat panel. They carry no
+    // data, so reflecting the origin is safe. The construct IDs of the two defaults are kept from before they had
+    // bodies, so that CloudFormation updates them in place: replacing one would reset it to API Gateway's default.
+    for (const { type, code, message, status } of GATEWAY_ERRORS) {
       api.addGatewayResponse(`${type.responseType}Cors`, {
         type,
+        statusCode: status,
         responseHeaders: {
           'Access-Control-Allow-Origin': 'method.request.header.Origin',
           Vary: "'Origin'",
         },
+        templates: { 'application/json': `{"error":{"code":"${code}","message":${message}}}` },
       });
     }
 
@@ -533,7 +590,11 @@ export class OrcaSonarStatelessStack extends Stack {
     parts.table.grantReadWriteData(run);
     run.addToRolePolicy(
       new PolicyStatement({
-        actions: ['bedrock:StartIngestionJob', 'bedrock:ListIngestionJobs'],
+        actions: [
+          'bedrock:StartIngestionJob',
+          'bedrock:ListIngestionJobs',
+          'bedrock:GetIngestionJob',
+        ],
         resources: [parts.knowledgeBaseArn],
       })
     );
@@ -546,6 +607,23 @@ export class OrcaSonarStatelessStack extends Stack {
       alarmDescription: 'OrcaSonar ingestion scheduling errors: the index may be going stale',
       metric: run.metricErrors({ period: Duration.hours(1) }),
       threshold: 2,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+    // A job that fails leaves the index stale; the run function logs it as job-failed and starts another next time.
+    const jobsFailed = new MetricFilter(this, 'IngestJobsFailedMetric', {
+      logGroup: run.logGroup,
+      metricNamespace: 'OrcaSonar',
+      metricName: 'IngestionJobsFailed',
+      filterPattern: FilterPattern.stringValue('$.outcome', '=', 'job-failed'),
+      metricValue: '1',
+    });
+    new Alarm(this, 'IngestJobsFailedAlarm', {
+      alarmDescription:
+        'OrcaSonar ingestion jobs failed: the index stays stale until one completes',
+      metric: jobsFailed.metric({ period: Duration.hours(1), statistic: Stats.SUM }),
+      threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: TreatMissingData.NOT_BREACHING,
@@ -571,10 +649,9 @@ export class OrcaSonarStatelessStack extends Stack {
       })
     );
 
-    const budgetName = `orcasonar-bedrock-${props.stageSlug}`;
-    new CfnBudget(this, 'Budget', {
+    const budget = new CfnBudget(this, 'Budget', {
       budget: {
-        budgetName,
+        budgetName: `orcasonar-bedrock-${props.stageSlug}`,
         budgetType: 'COST',
         timeUnit: 'MONTHLY',
         budgetLimit: { amount: props.budget.monthlyUsd, unit: 'USD' },
@@ -616,8 +693,9 @@ export class OrcaSonarStatelessStack extends Stack {
         conditions: { ArnEquals: { 'iam:PolicyARN': deny.managedPolicyArn } },
       })
     );
-    new CfnBudgetsAction(this, 'BudgetAction', {
-      budgetName,
+    const action = new CfnBudgetsAction(this, 'BudgetAction', {
+      // The budget's Ref is its name, and orders the action after the budget it acts on.
+      budgetName: budget.ref,
       actionType: 'APPLY_IAM_POLICY',
       actionThreshold: { type: 'PERCENTAGE', value: 100 },
       notificationType: 'ACTUAL',
@@ -628,5 +706,7 @@ export class OrcaSonarStatelessStack extends Stack {
       },
       subscribers: [{ type: 'SNS', address: topic.topicArn }],
     });
+    // The role's policy too, not only the role, exists before the action that runs as it.
+    action.node.addDependency(actionRole);
   }
 }

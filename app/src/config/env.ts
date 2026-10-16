@@ -10,6 +10,8 @@ const schema = z.object({
   DATA_SOURCE_ID: z.string().min(1).optional(),
   GUARDRAIL_ID: z.string().min(1).optional(),
   GUARDRAIL_VERSION: z.string().min(1).optional(),
+  /** Where the current guardrail version is published; read at run time, so a new version needs no deploy. */
+  GUARDRAIL_VERSION_PARAMETER: z.string().min(1).optional(),
   ANSWER_MODEL_ID: z.string().min(1).optional(),
   MONTHLY_BUDGET_USD: z.coerce.number().positive().default(50),
   CALLER_DAILY_USD: z.coerce.number().positive().default(0.4),

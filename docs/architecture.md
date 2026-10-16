@@ -11,16 +11,16 @@ client list, and more sources become more knowledge base data sources.
 | AWS WAF                | stateless | AWS managed rule groups (IP reputation, common rules, known bad inputs) and a rate limit of 300 requests per five minutes per address, in front of the whole API.                                                                                                                                                                                                                        |
 | API Gateway REST API   | stateless | Regional, at `sonar.<stage zone>` on the stage's existing certificate. A REST API rather than the HTTP API OrcaBus services use, because HTTP APIs cannot stream and stop at 30 seconds. The default `execute-api` endpoint is disabled. Answers the open routes itself, from mock integrations: `/api/v1/health`, and the API docs at `/schema/swagger-ui/` and `/schema/openapi.json`. |
 | Lambda authorizer      | stateless | A TOKEN authorizer. Verifies a Cognito ID token from the `data-portal-<stage>` pool, issued to an allowed client, with `aws-jwt-verify`. Passes the caller's `sub` and client ID on; cached five minutes per token.                                                                                                                                                                      |
-| Chat Lambda            | stateless | `POST /chat`, invoked with response streaming. Checks the budget, loads the conversation, retrieves passages, calls Claude with the guardrail, streams server-sent events, then records the cost and the exchange.                                                                                                                                                                       |
+| Chat Lambda            | stateless | `POST /chat`, invoked with response streaming. Holds the most an answer can cost against the budget, loads the conversation, retrieves passages, calls Claude with the guardrail (its version read from SSM every five minutes), streams server-sent events, then settles the hold at the answer's cost and records the exchange.                                                        |
 | Query Lambda           | stateless | `/search`, `/documents/{id}` and `/feedback`, answered as JSON. Like the chat Lambda, it is reachable only through the authorizer.                                                                                                                                                                                                                                                       |
-| Ingestion Lambdas      | stateless | One marks the index stale when an object under `docs/` changes; the other runs every 15 minutes and starts one ingestion job if the index is stale and no job is running.                                                                                                                                                                                                                |
+| Ingestion Lambdas      | stateless | One marks the index stale when an object under `docs/` changes; the other runs every 15 minutes, follows the job it started last, and starts one if the index is still stale and no job is running.                                                                                                                                                                                      |
 | Budget backstop        | stateless | An AWS Budgets monthly budget on Bedrock that notifies at 80% and, at 100%, attaches a policy denying Bedrock to the chat role.                                                                                                                                                                                                                                                          |
 | Sonar KMS key          | stateful  | Encrypts the buckets, the table and the knowledge base's index. Rotated yearly.                                                                                                                                                                                                                                                                                                          |
 | Ingest bucket          | stateful  | The knowledge base's only input. Only the docs platform's `docs-publisher` role writes, and only under `docs/`. Versioned.                                                                                                                                                                                                                                                               |
 | Managed knowledge base | stateful  | AWS-managed vector store, managed embeddings, hybrid search and the managed reranker. One data source, `docs`, on the ingest bucket's `docs/` prefix.                                                                                                                                                                                                                                    |
 | Guardrail              | stateful  | Denied topics (medical advice about a person, personal data about patients), personal-data masking, and a grounding check against the retrieved passages.                                                                                                                                                                                                                                |
 | Records bucket         | stateful  | One JSON record per exchange under `records/`, and feedback under `feedback/`, deleted after 30 days. `eval-set/` is kept.                                                                                                                                                                                                                                                               |
-| DynamoDB table         | stateful  | Spend counters, conversation turns (30 days) and the ingestion flag.                                                                                                                                                                                                                                                                                                                     |
+| DynamoDB table         | stateful  | Spend counters, conversation turns (30 days) and the ingestion state.                                                                                                                                                                                                                                                                                                                    |
 
 The stateful stack keeps everything that holds data, so API changes never touch it. The stateless stack finds the
 stateful resources through SSM parameters under `/orcasonar/`.
@@ -30,24 +30,28 @@ stateful resources through SSM parameters under `/orcasonar/`.
 1. The chat panel posts `{query, conversationId?, sites?}` to `/api/v1/chat` with the reader's ID token and
    `Accept: text/event-stream`.
 2. WAF applies its rules; API Gateway answers CORS preflight for the docs hosts; the authorizer verifies the token.
-3. The chat Lambda checks today's spend: the team's allowance and the reader's cap. Over either, it answers `429`
-   with `Retry-After` until midnight in Melbourne.
+3. The chat Lambda checks today's spend against the team's allowance and the reader's cap, and holds the most an
+   answer can cost against both in one conditional write. Over either, it answers `429` with `Retry-After` until
+   midnight in Melbourne.
 4. It sends `meta` (`exchangeId`, `conversationId`), loads the conversation's last six turns, and retrieves the top
    eight passages, filtered on `site` when the panel limits the question to one site.
 5. With no passages, it says the documentation does not cover the question, without calling the model.
 6. Otherwise it calls Claude through `ConverseStream` with the guardrail, the passages as the grounding source and
    the question as the query, and streams each piece of the answer as a `delta` event.
 7. It sends `citations` (the passages the answer cites, by number) and `done` (token usage).
-8. It prices the exchange from the tokens used, adds it to the caller's and the team's spend, saves the turn, and
-   writes the record.
+8. It prices the exchange from the tokens used, settles the hold at that cost, saves the turn, and writes the
+   record. If answering fails, the hold settles at what is known to be spent: nothing before retrieval, the retrieval
+   before the model is called, and the whole hold once it is.
 
 ## Ingestion
 
 The docs platform's publish steps upload each site's pages as processed Markdown with metadata files under
-`docs/<slug>/`, and delete documents for removed pages. Every change marks the index stale. Every 15 minutes, if it is
-stale and no job is running, one ingestion job starts; a change that arrives while the job starts keeps the index
-marked, so the next run picks it up. Jobs on one data source cannot overlap, and many sites can publish at once, so
-jobs are never started per change. A push is usually searchable within about 20 minutes.
+`docs/<slug>/`, and delete documents for removed pages. Every change marks the index stale, with the change's event
+ID. Every 15 minutes, if it is stale and no job is running, one ingestion job starts, and the mark it covers is kept
+with it. The mark is cleared only when that job completes, and only if no newer change has marked the index since;
+otherwise the next run starts another job. A job that fails or is stopped leaves the mark, so the next run tries
+again, and raises `IngestJobsFailedAlarm`. Jobs on one data source cannot overlap, and many sites can publish at once,
+so jobs are never started per change. A push is usually searchable within about 20 minutes.
 
 Later sources (OrcaBus API docs, OrcaHouse schemas) get their own data sources and their own access rules rather
 than sharing `docs`.
@@ -62,6 +66,11 @@ them with the model's rates, plus retrieval and the guardrail.
 - **Caller cap per day**: $0.40, about 20 answers.
 - **Per-request limits**: 2,000 characters of question, six turns of history, eight passages and 1,000 output
   tokens keep the most expensive answer under about 8 cents.
+- **Holds**: before an answer, $0.10, more than any answer can cost, is added to the caller's and the team's spend in
+  one DynamoDB transaction, conditional on both being under their limits; the answer's cost then replaces it. Answers
+  asked at the same moment, on any number of Lambda instances, cannot all pass a check that each would pass alone, so
+  a caller goes over a limit by one answer at most. An answer that fails after the model is called keeps the whole
+  hold, because its tokens may be billed without being reported.
 - **Backstop**: the AWS Budgets action. Budgets data updates only a few times a day, so the Lambda's own counters
   are the real control.
 

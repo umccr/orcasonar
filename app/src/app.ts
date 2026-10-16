@@ -3,10 +3,10 @@ import { Hono } from 'hono';
 import { cors } from 'hono/cors';
 import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
-import { ApiError, invalidRequest } from './lib/errors';
+import { ApiError, errorDetail, invalidRequest } from './lib/errors';
 import { newId } from './lib/ids';
 import type { Budget } from './services/budget';
-import type { Caller, ChatDeps, ChatEvent } from './services/chat';
+import type { Caller, ChatDeps, ChatEvent, ChatRequest, ChatResult } from './services/chat';
 import { answerQuestion } from './services/chat';
 import { parseDocumentId } from './services/documents';
 import type { Retriever } from './services/retrieval';
@@ -100,22 +100,6 @@ const callerFrom = (c: Context<Env>, devCaller?: Caller): Caller => {
   throw new ApiError(401, 'unauthorized', 'Sign in again to use OrcaSonar.');
 };
 
-/**
- * An unexpected error, for the logs only: its name and the start of its message, so an operator can see which call
- * failed and why (an AWS error names the action and the resource it refused). Any text given in `remove`, such as
- * the question, is cut out, so a message that echoes it never reaches the logs. Clients never see this.
- */
-export const errorDetail = (error: unknown, remove: string[] = []): Record<string, string> => {
-  if (!(error instanceof Error)) {
-    return { error: 'unknown' };
-  }
-  let detail = error.message.slice(0, 500);
-  for (const text of remove.filter(Boolean)) {
-    detail = detail.split(text).join('[removed]');
-  }
-  return { error: error.name, detail };
-};
-
 export const createApp = (deps: AppDeps) => {
   const app = new Hono<Env>().basePath('/api/v1');
 
@@ -141,19 +125,40 @@ export const createApp = (deps: AppDeps) => {
   });
   app.notFound((c) => c.json(new ApiError(404, 'not-found', 'No such endpoint.').body(), 404));
 
+  /**
+   * A failed answer as the client sees it, streamed or not: an ApiError as it is, and anything else, such as Bedrock
+   * refusing or throttling, as `503 unavailable`. What failed is logged, without the question.
+   */
+  const answerFailure = (error: unknown, request: ChatRequest, outcome: string): ApiError => {
+    const failure =
+      error instanceof ApiError
+        ? error
+        : new ApiError(503, 'unavailable', 'The answer stopped early. Try again shortly.');
+    deps.log({
+      outcome,
+      exchangeId: request.exchangeId,
+      code: failure.code,
+      ...(error instanceof ApiError ? {} : errorDetail(error, [request.question])),
+    });
+    return failure;
+  };
+
   app.post('/chat', async (c) => {
     const caller = callerFrom(c, deps.devCaller);
     const body = await parseBody(c, ChatBody);
-    await deps.budget.ensure(caller.id);
-
     const chat: ChatDeps = { ...deps, answerer: deps.answerer() };
-    const request = {
+    const conversationId = body.conversationId ?? newId('c');
+    const exchangeId = newId('x');
+    // Last before answering: from here, answering the question settles what is held.
+    const hold = await deps.budget.reserve(caller.id);
+    const request: ChatRequest = {
       caller,
       question: body.query,
       sites: body.sites,
-      conversationId: body.conversationId ?? newId('c'),
+      conversationId,
       continuing: body.conversationId !== undefined,
-      exchangeId: newId('x'),
+      exchangeId,
+      hold,
     };
 
     if ((c.req.header('accept') ?? '').includes('text/event-stream')) {
@@ -166,16 +171,7 @@ export const createApp = (deps: AppDeps) => {
             stream.writeSSE({ event: event.event, data: JSON.stringify(event.data) })
           );
         } catch (error) {
-          const failure =
-            error instanceof ApiError
-              ? error
-              : new ApiError(503, 'unavailable', 'The answer stopped early. Try again shortly.');
-          deps.log({
-            outcome: 'stream-error',
-            exchangeId: request.exchangeId,
-            code: failure.code,
-            ...(error instanceof ApiError ? {} : errorDetail(error, [request.question])),
-          });
+          const failure = answerFailure(error, request, 'stream-error');
           // The reader may have gone; there is then no one to tell.
           await stream
             .writeSSE({
@@ -187,7 +183,12 @@ export const createApp = (deps: AppDeps) => {
       });
     }
 
-    const result = await answerQuestion(chat, request, async () => undefined);
+    let result: ChatResult;
+    try {
+      result = await answerQuestion(chat, request, async () => undefined);
+    } catch (error) {
+      throw answerFailure(error, request, 'answer-error');
+    }
     return c.json({
       exchangeId: request.exchangeId,
       conversationId: request.conversationId,
@@ -209,7 +210,8 @@ export const createApp = (deps: AppDeps) => {
 
   app.get('/documents/:id', async (c) => {
     callerFrom(c, deps.devCaller);
-    const parsed = parseDocumentId(decodeURIComponent(c.req.param('id')));
+    // Hono has decoded the parameter already; decoding it again would change or refuse IDs that contain `%`.
+    const parsed = parseDocumentId(c.req.param('id'));
     if (!parsed) {
       throw invalidRequest('id must be <site>:<path>, as in a citation.');
     }

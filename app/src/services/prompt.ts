@@ -24,8 +24,9 @@ export const SYSTEM_PROMPT = [
   'Answer only from the numbered sources in the latest message. If they do not contain the answer, say that the',
   'documentation does not cover it, and suggest what to search for instead. Never invent commands, names or links.',
   'Cite the sources you use with their numbers in square brackets, like [1] or [2][3], right after the sentence they',
-  'support. Be brief and practical: lead with the answer, then the steps or details. Use plain text with short',
-  'paragraphs or numbered steps; no tables.',
+  'support. Be brief and practical: lead with the answer, then the steps or details. Write Markdown for a narrow chat',
+  'panel: short paragraphs, numbered steps or bullet lists, **bold** for the key facts, `code` for commands, paths and',
+  'identifiers, and fenced code blocks for anything to copy. No headings, and a table only for a short comparison.',
 ].join(' ');
 
 /** The sources block: numbered passages with their titles and links. */

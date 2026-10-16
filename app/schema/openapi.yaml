@@ -5,7 +5,8 @@ info:
   description: |
     Answers and search over UMCCR documentation. Every endpoint except `/health` needs a Cognito ID token from an
     allowed app client, sent as `Authorization: Bearer <token>`. Errors share one shape: `{"error": {"code", "message",
-    "retryAfter"?}}`. Answers and sources are plain text; clients must not render them as HTML.
+    "retryAfter"?}}`. Answers are Markdown that cites sources as `[n]`; titles and snippets are plain text. Clients
+    must never insert any of them into a page as HTML.
 servers:
   - url: https://sonar.prod.umccr.org/api/v1
   - url: https://sonar.dev.umccr.org/api/v1
@@ -17,9 +18,10 @@ paths:
       summary: Answer a question from the documentation
       description: |
         With `Accept: text/event-stream` the answer streams as server-sent events, in this order: `meta`
-        (`{exchangeId, conversationId}`), `delta` (`{text}`, repeated), `citations` (an array of sources), `done`
+        (`{exchangeId, conversationId}`), `delta` (`{text}`, repeated), `citations` (an array of citations), `done`
         (`{usage}`). An `error` event (`{code, message}`) ends the stream early. Otherwise the response is one JSON
-        object. Pass `conversationId` from a previous answer to ask a follow-up.
+        object. Pass `conversationId` from a previous answer to ask a follow-up. The answer is Markdown, and `[n]` in
+        it cites the citation whose `ref` is n.
       requestBody:
         required: true
         content:
@@ -150,10 +152,10 @@ components:
       properties:
         exchangeId: { type: string, pattern: '^x_[0-9a-f]{32}$' }
         conversationId: { type: string, pattern: '^c_[0-9a-f]{32}$' }
-        answer: { type: string }
+        answer: { type: string, description: 'Markdown; `[n]` cites the citation whose `ref` is n' }
         citations:
           type: array
-          items: { $ref: '#/components/schemas/Source' }
+          items: { $ref: '#/components/schemas/Citation' }
         usage: { $ref: '#/components/schemas/Usage' }
     SearchRequest:
       type: object
@@ -177,8 +179,19 @@ components:
         title: { type: string }
         url: { type: string, format: uri }
         site: { type: string }
-        snippet: { type: string }
+        snippet: { type: string, description: 'Plain text, up to 280 characters' }
         score: { type: number }
+    Citation:
+      description: A source the answer cites
+      allOf:
+        - { $ref: '#/components/schemas/Source' }
+        - type: object
+          required: [ref]
+          properties:
+            ref:
+              type: integer
+              minimum: 1
+              description: 'The number the answer cites this source by: `[2]` cites the citation whose `ref` is 2'
     Document:
       type: object
       required: [id, site, title, url, updated, markdown]

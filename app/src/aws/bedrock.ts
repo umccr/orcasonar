@@ -1,5 +1,9 @@
 import type { BedrockAgentClient } from '@aws-sdk/client-bedrock-agent';
-import { ListIngestionJobsCommand, StartIngestionJobCommand } from '@aws-sdk/client-bedrock-agent';
+import {
+  GetIngestionJobCommand,
+  ListIngestionJobsCommand,
+  StartIngestionJobCommand,
+} from '@aws-sdk/client-bedrock-agent';
 import type {
   BedrockAgentRuntimeClient,
   RetrievalFilter,
@@ -11,6 +15,7 @@ import type {
 } from '@aws-sdk/client-bedrock-runtime';
 import { ConverseStreamCommand } from '@aws-sdk/client-bedrock-runtime';
 import type { AnswerEvent, AnswerRequest, Answerer } from '../services/answer';
+import type { Ingestion, JobStatus } from '../services/ingestion';
 import type { Passage, RetrieveOptions, Retriever } from '../services/retrieval';
 
 /**
@@ -57,15 +62,22 @@ export class KnowledgeBaseRetriever implements Retriever {
   }
 }
 
+export interface Guardrail {
+  readonly id: string;
+  readonly version: string;
+}
+
 /** Claude through Bedrock's Converse API, streamed, with the guardrail applied as the answer is written. */
 export class BedrockAnswerer implements Answerer {
   constructor(
     private readonly client: BedrockRuntimeClient,
     readonly modelId: string,
-    private readonly guardrail?: { id: string; version: string }
+    /** Asked for each answer: the guardrail's version can change while the function runs. */
+    private readonly guardrail?: () => Promise<Guardrail>
   ) {}
 
   async *stream(request: AnswerRequest): AsyncIterable<AnswerEvent> {
+    const guardrail = await this.guardrail?.();
     const response = await this.client.send(
       new ConverseStreamCommand({
         modelId: this.modelId,
@@ -74,10 +86,10 @@ export class BedrockAnswerer implements Answerer {
         // No sampling parameters: Claude Sonnet 5 rejects `temperature` ("deprecated for this model"), and the
         // grounding check and the prompt keep answers to the passages.
         inferenceConfig: { maxTokens: request.maxTokens },
-        guardrailConfig: this.guardrail
+        guardrailConfig: guardrail
           ? {
-              guardrailIdentifier: this.guardrail.id,
-              guardrailVersion: this.guardrail.version,
+              guardrailIdentifier: guardrail.id,
+              guardrailVersion: guardrail.version,
               streamProcessingMode: 'sync',
             }
           : undefined,
@@ -102,8 +114,8 @@ export class BedrockAnswerer implements Answerer {
   }
 }
 
-/** Starting ingestion jobs on the `docs` data source, one at a time. */
-export class KnowledgeBaseIngestion {
+/** Starting ingestion jobs on the `docs` data source, one at a time, and following them to the end. */
+export class KnowledgeBaseIngestion implements Ingestion {
   constructor(
     private readonly client: BedrockAgentClient,
     private readonly knowledgeBaseId: string,
@@ -130,6 +142,46 @@ export class KnowledgeBaseIngestion {
         description: 'Documents changed under docs/',
       })
     );
-    return result.ingestionJob?.ingestionJobId ?? 'unknown';
+    const jobId = result.ingestionJob?.ingestionJobId;
+    if (!jobId) {
+      throw new Error('StartIngestionJob returned no job ID');
+    }
+    return jobId;
+  }
+
+  async status(jobId: string): Promise<JobStatus> {
+    let job;
+    try {
+      job = (
+        await this.client.send(
+          new GetIngestionJobCommand({
+            knowledgeBaseId: this.knowledgeBaseId,
+            dataSourceId: this.dataSourceId,
+            ingestionJobId: jobId,
+          })
+        )
+      ).ingestionJob;
+    } catch (error) {
+      // A job the service no longer knows, as after the knowledge base was replaced, will never finish.
+      if ((error as { name?: string }).name === 'ResourceNotFoundException') {
+        return { state: 'failed', detail: { status: 'NOT_FOUND' } };
+      }
+      throw error;
+    }
+    switch (job?.status) {
+      case 'COMPLETE':
+        return {
+          state: 'complete',
+          detail: { documentsFailed: job.statistics?.numberOfDocumentsFailed ?? 0 },
+        };
+      case 'FAILED':
+      case 'STOPPED':
+        return {
+          state: 'failed',
+          detail: { status: job.status, reasons: job.failureReasons ?? [] },
+        };
+      default:
+        return { state: 'running' };
+    }
   }
 }
