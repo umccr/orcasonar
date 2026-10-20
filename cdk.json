@@ -1,0 +1,19 @@
+{
+  "app": "pnpm exec ts-node bin/deploy.ts",
+  "watch": {
+    "include": ["**"],
+    "exclude": [
+      "README.md",
+      "cdk*.json",
+      "**/*.d.ts",
+      "**/*.js",
+      "tsconfig.json",
+      "package*.json",
+      "node_modules",
+      "test",
+      "docs",
+      "pnpm-lock.yaml"
+    ]
+  },
+  "context": {}
+}
