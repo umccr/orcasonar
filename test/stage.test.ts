@@ -3,12 +3,12 @@ import * as path from 'path';
 import { App, Stack } from 'aws-cdk-lib';
 import { Match, Template } from 'aws-cdk-lib/assertions';
 import { parse } from 'yaml';
-import { StageName } from '@orcabus/platform-cdk-constructs/shared-config/accounts';
 import { STAGE_ENVIRONMENTS } from '../infrastructure/environments';
 import {
   DOCS_ORIGINS,
   getOrcaSonarStatefulStackProps,
   getOrcaSonarStatelessStackProps,
+  OrcaSonarStage,
 } from '../infrastructure/stage/config';
 import { APP_ROOT, SSM_PARAMETERS } from '../infrastructure/stage/constants';
 import { OrcaSonarStatefulStack } from '../infrastructure/stage/stateful-stack';
@@ -19,10 +19,9 @@ import {
   expectNoUnacknowledgedFindings,
 } from './cdk-nag-helpers';
 
-const STAGES: StageName[] = ['BETA', 'GAMMA', 'PROD'];
+const STAGES: OrcaSonarStage[] = ['BETA', 'PROD'];
 const ENVIRONMENTS = {
   BETA: STAGE_ENVIRONMENTS.beta,
-  GAMMA: STAGE_ENVIRONMENTS.gamma,
   PROD: STAGE_ENVIRONMENTS.prod,
 };
 
@@ -48,7 +47,7 @@ const ACCEPTED_RULES = [
   'AwsSolutions-APIG4',
 ];
 
-const statefulStack = (stage: StageName) => {
+const statefulStack = (stage: OrcaSonarStage) => {
   const app = new App();
   const stack = new OrcaSonarStatefulStack(app, `${stage}Stateful`, {
     env: ENVIRONMENTS[stage],
@@ -57,7 +56,7 @@ const statefulStack = (stage: StageName) => {
   return { app, stack };
 };
 
-const statelessStack = (stage: StageName) => {
+const statelessStack = (stage: OrcaSonarStage) => {
   const app = new App();
   const stack = new OrcaSonarStatelessStack(app, `${stage}Stateless`, {
     env: ENVIRONMENTS[stage],
@@ -421,6 +420,90 @@ describe('stateless stack', () => {
   test('checks for changed documents every 15 minutes', () => {
     template.hasResourceProperties('AWS::Events::Rule', {
       ScheduleExpression: 'rate(15 minutes)',
+    });
+  });
+
+  test('tells the alerts topic when any alarm fires and when it clears', () => {
+    const [topic] = Object.keys(template.findResources('AWS::SNS::Topic'));
+    // Kept from when the topic carried only the budget's notices, so that it is never replaced.
+    expect(topic).toMatch(/^BudgetTopic/);
+    const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm')) as {
+      Properties: { AlarmActions?: unknown; OKActions?: unknown };
+    }[];
+    expect(alarms.length).toBeGreaterThan(0);
+    for (const { Properties: alarm } of alarms) {
+      expect(alarm.AlarmActions).toEqual([{ Ref: topic }]);
+      expect(alarm.OKActions).toEqual([{ Ref: topic }]);
+    }
+    // The topic's own policy replaces SNS's default, so it names every service that publishes.
+    const policy = JSON.stringify(template.findResources('AWS::SNS::TopicPolicy'));
+    expect(policy).toContain('cloudwatch.amazonaws.com');
+    expect(policy).toContain('budgets.amazonaws.com');
+  });
+
+  test('emails the alerts to the addresses configured for the stage', () => {
+    const stack = new OrcaSonarStatelessStack(new App(), 'AlertedStateless', {
+      env: ENVIRONMENTS.PROD,
+      ...getOrcaSonarStatelessStackProps('PROD'),
+      alertEmails: ['platform-alerts@example.org'],
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::SNS::Subscription', {
+      Protocol: 'email',
+      Endpoint: 'platform-alerts@example.org',
+    });
+  });
+
+  // The functions answer their own errors, a streamed answer's after its 200, so Lambda errors miss them.
+  test('alarms on failed answers and writes, which the chat function logs rather than throws', () => {
+    template.hasResourceProperties('AWS::Logs::MetricFilter', {
+      LogGroupName: { Ref: Match.stringLikeRegexp('^ChatFunctionLogGroup') },
+      FilterPattern:
+        '{ ((($.outcome = "stream-error") || ($.outcome = "answer-error")) && ' +
+        '($.code = "unavailable")) || ($.outcome = "error") }',
+      MetricTransformations: [
+        Match.objectLike({ MetricNamespace: 'OrcaSonar', MetricName: 'AnswersFailed' }),
+      ],
+    });
+    template.hasResourceProperties('AWS::Logs::MetricFilter', {
+      LogGroupName: { Ref: Match.stringLikeRegexp('^ChatFunctionLogGroup') },
+      FilterPattern: '{ ($.outcome = "settle-error") || ($.outcome = "write-error") }',
+      MetricTransformations: [
+        Match.objectLike({ MetricNamespace: 'OrcaSonar', MetricName: 'WritesFailed' }),
+      ],
+    });
+    for (const metric of ['AnswersFailed', 'WritesFailed']) {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        Namespace: 'OrcaSonar',
+        MetricName: metric,
+      });
+    }
+    // Searches, documents and feedback answer 5XX when they fail.
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Namespace: 'AWS/ApiGateway',
+      MetricName: '5XXError',
+    });
+  });
+
+  // Questions are only ever text for the model, so these rules would block readers and protect nothing.
+  test('only counts the managed body rules that questions about links, HTML or addresses trip', () => {
+    template.hasResourceProperties('AWS::WAFv2::WebACL', {
+      Rules: Match.arrayWith([
+        Match.objectLike({
+          Name: 'AWSManagedRulesCommonRuleSet',
+          Statement: {
+            ManagedRuleGroupStatement: {
+              VendorName: 'AWS',
+              Name: 'AWSManagedRulesCommonRuleSet',
+              RuleActionOverrides: [
+                { Name: 'GenericLFI_BODY', ActionToUse: { Count: {} } },
+                { Name: 'GenericRFI_BODY', ActionToUse: { Count: {} } },
+                { Name: 'CrossSiteScripting_BODY', ActionToUse: { Count: {} } },
+                { Name: 'EC2MetaDataSSRF_BODY', ActionToUse: { Count: {} } },
+              ],
+            },
+          },
+        }),
+      ]),
     });
   });
 });

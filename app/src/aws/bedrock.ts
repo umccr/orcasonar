@@ -95,6 +95,8 @@ export class BedrockAnswerer implements Answerer {
           : undefined,
       })
     );
+    // Bedrock refuses a request, for access or throttling, before the response starts; from here it may bill tokens.
+    yield { type: 'started' };
     for await (const event of response.stream ?? []) {
       const text = event.contentBlockDelta?.delta?.text;
       if (text) {

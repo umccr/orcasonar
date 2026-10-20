@@ -10,7 +10,7 @@ import type { Caller, ChatDeps, ChatEvent, ChatRequest, ChatResult } from './ser
 import { answerQuestion } from './services/chat';
 import { parseDocumentId } from './services/documents';
 import type { Retriever } from './services/retrieval';
-import { toSource } from './services/retrieval';
+import { MAX_QUESTION_CHARACTERS, toSource } from './services/retrieval';
 import type { DocumentStore, RecordStore } from './services/stores';
 
 export interface AppDeps extends Omit<ChatDeps, 'budget' | 'answerer'> {
@@ -41,7 +41,7 @@ const SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const Sites = z.array(z.string().regex(SLUG)).min(1).max(20).optional();
 
 const ChatBody = z.object({
-  query: z.string().trim().min(1).max(2000),
+  query: z.string().trim().min(1).max(MAX_QUESTION_CHARACTERS),
   conversationId: z
     .string()
     .regex(/^c_[0-9a-f]{32}$/)
@@ -51,7 +51,7 @@ const ChatBody = z.object({
 });
 
 const SearchBody = z.object({
-  query: z.string().trim().min(1).max(2000),
+  query: z.string().trim().min(1).max(MAX_QUESTION_CHARACTERS),
   topK: z.number().int().min(1).max(20).default(8),
   sites: Sites,
 });

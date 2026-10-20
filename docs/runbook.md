@@ -1,7 +1,46 @@
 # Runbook
 
 Operating OrcaSonar. Deploying it, the first time and after, is in [deploy.md](deploy.md): changes are pull
-requests that the two pipelines deploy to beta and gamma, then to prod after approval.
+requests that the two pipelines deploy to beta, then to prod after approval.
+
+## An alarm fired
+
+Every alarm tells the alerts topic when it fires and when it clears. In the stage account, its name starts with
+`UMCCR-OrcaSonarStatelessStack-` and the alarm's name below.
+
+| Alarm                                                                 | What it means                                                                                                                                             | Where to look                                                                                                                                                                                                                            |
+| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AnswersFailedAlarm`                                                  | Three answers failed within 15 minutes: readers saw "The answer stopped early" or another error.                                                          | The chat function's log lines with `outcome` `stream-error`, `answer-error` or `error`: `error` and `detail` name the call that failed and why. The usual causes are in the deploy guide's [troubleshooting](deploy.md#troubleshooting). |
+| `WritesFailedAlarm`                                                   | A reader got an answer, but its cost could not be settled (`settle-error`), or its turn or record could not be saved (`write-error`; `write` says which). | The chat function's logs. An unsettled answer keeps its whole hold; a lost turn leaves the next follow-up without it; a lost record leaves the exchange out of evaluation.                                                               |
+| `ApiServerErrorsAlarm`                                                | Three 5XX responses within 15 minutes: searches, documents or feedback that failed, or answers that failed before they started streaming.                 | The query function's log lines with `outcome` `error`, and the chat function's for answers.                                                                                                                                              |
+| `ChatErrorsAlarm`, `QueryErrorsAlarm`                                 | A function crashed or timed out; its own errors are answered, so they never count here.                                                                   | The function's logs, and its `Duration` against its timeout.                                                                                                                                                                             |
+| `IngestMarkErrorsAlarm`, `IngestErrorsAlarm`, `IngestJobsFailedAlarm` | Changed documents may not reach the index.                                                                                                                | [The index is stale](#the-index-is-stale).                                                                                                                                                                                               |
+
+The failures, newest first, in CloudWatch Logs Insights on the function's log group:
+
+```text
+fields @timestamp, outcome, code, error, detail, write, exchangeId
+| filter outcome in ["stream-error", "answer-error", "error", "settle-error", "write-error"]
+| sort @timestamp desc
+```
+
+## Give back a reader's allowance
+
+When readers were refused because of a fault of ours, or a tester needs more answers today, lower what they have
+spent. To give every reader more, raise `CALLER_DAILY_USD` in `infrastructure/stage/config.ts` instead.
+
+Spend lives in the Sonar table (`/orcasonar/table-name`) as items under `pk` `spend`, each with its `usd`:
+`caller#<sub>#<date>` for one reader's day, `day#<date>` for the team's and `month#<month>` for the month's, with
+dates in Melbourne. A reader's `sub` is the `caller` in the chat function's log lines. Lower all three by the same
+amount in one transaction, so they still agree:
+
+```sh
+TABLE=$(aws ssm get-parameter --name /orcasonar/table-name --query Parameter.Value --output text)
+USD=0.30   # what to give back
+item() { printf '{"Update":{"TableName":"%s","Key":{"pk":{"S":"spend"},"sk":{"S":"%s"}},"UpdateExpression":"ADD #usd :usd","ExpressionAttributeNames":{"#usd":"usd"},"ExpressionAttributeValues":{":usd":{"N":"-%s"}}}}' "$TABLE" "$1" "$USD"; }
+aws dynamodb transact-write-items --transact-items \
+  "[$(item 'caller#<sub>#2026-10-21'),$(item 'day#2026-10-21'),$(item 'month#2026-10')]"
+```
 
 ## The budget ran out
 
@@ -21,14 +60,14 @@ every answer fails once the change deploys.
 
 1. Check the model has an active Australian profile:
    `aws bedrock list-inference-profiles --query "inferenceProfileSummaries[?starts_with(inferenceProfileId, 'au.anthropic')].inferenceProfileId"`.
-2. Accept its agreement in dev, stg and prod, following [the manual steps](deploy.md#accepting-the-manual-steps)
+2. Accept its agreement in dev and prod, following [the manual steps](deploy.md#accepting-the-manual-steps)
    with its model ID: the profile ID without `au.`, for example `anthropic.claude-haiku-5-5`.
 3. In `infrastructure/stage/config.ts`, add the profile to `ALLOWED_MODEL_IDS`, and set `ANSWER_MODEL_ID` if it should
    answer. The chat role's permissions follow `ALLOWED_MODEL_IDS`.
 4. Add its rates to `app/src/services/pricing.ts`, in US dollars per million tokens at the Australian profile's
    prices, so that the budget counts it.
 5. Before it answers readers, compare it with the current model on the evaluation set in `eval-set/`.
-6. Merge. The stateless pipeline deploys it to beta and gamma, and to prod after approval.
+6. Merge. The stateless pipeline deploys it to beta, and to prod after approval.
 
 ## The index is stale
 

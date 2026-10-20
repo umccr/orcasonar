@@ -64,9 +64,9 @@ describe.each([
     });
   });
 
-  test('deploys beta, then gamma, then prod', () => {
+  test('deploys beta, then prod', () => {
     const stages = pipelineOf(stack, pipelineName).Stages.map((stage) => stage.Name);
-    expect(stages).toEqual(['Source', 'Build', 'UpdatePipeline', 'Beta', 'Gamma', 'Prod']);
+    expect(stages).toEqual(['Source', 'Build', 'UpdatePipeline', 'Beta', 'Prod']);
   });
 
   // OrcaSonar is UMCCR's: the same stack name in every stage account, tagged as OrcaSonar.

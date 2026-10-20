@@ -30,7 +30,7 @@ import {
 } from './constants';
 
 export interface OrcaSonarStatefulStackProps extends StackProps {
-  /** `beta`, `gamma` or `prod`, for names. */
+  /** `beta` or `prod`, for names. */
   readonly stageSlug: string;
   /** RETAIN in prod, so data and the index survive a stack deletion there. */
   readonly removalPolicy: RemovalPolicy;
@@ -77,7 +77,9 @@ export class OrcaSonarStatefulStack extends Stack {
     });
 
     // The docs platform's publish role writes docs/<slug>/; each publish narrows itself to one site. Matched by
-    // condition rather than as the principal, so this policy is valid before the role exists.
+    // condition rather than as the principal, so this policy is valid before the role exists. A statement for the
+    // account principal only defers to IAM: the role's own policy, in umccr/docs-platform's hosting stack, grants
+    // the access, matching this bucket by its generated name.
     const publisherCondition = { ArnEquals: { 'aws:PrincipalArn': docsPublisherArn } };
     ingestBucket.addToResourcePolicy(
       new PolicyStatement({

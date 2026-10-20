@@ -37,12 +37,12 @@ Content-Type: application/json
 {"query": "How do I add a site to docs.umccr.org?", "sites": ["platform"]}
 ```
 
-| Field            | Meaning                                                                   |
-| ---------------- | ------------------------------------------------------------------------- |
-| `query`          | the question, 1 to 2,000 characters                                       |
-| `conversationId` | optional: the `conversationId` from an earlier answer, to ask a follow-up |
-| `sites`          | optional: limit to these docs sites (slugs)                               |
-| `mode`           | optional: `ask`, the only mode in release 1                               |
+| Field            | Meaning                                                                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `query`          | the question, 1 to 2,000 characters                                                                                       |
+| `conversationId` | optional: the `conversationId` from an earlier answer, to ask a follow-up; it is searched for with the question before it |
+| `sites`          | optional: limit to these docs sites (slugs)                                                                               |
+| `mode`           | optional: `ask`, the only mode in release 1                                                                               |
 
 With `Accept: text/event-stream`, the answer streams as server-sent events, in this order:
 

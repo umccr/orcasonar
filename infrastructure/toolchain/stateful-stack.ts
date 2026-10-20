@@ -12,7 +12,7 @@ export const STATEFUL_PIPELINE_NAME = 'UMCCR-OrcaSonarStateful';
 /** The stateful stack's CloudFormation name, the same in every stage: each stage is its own account. */
 export const STATEFUL_STACK_NAME = 'UMCCR-OrcaSonarStatefulStack';
 
-/** Deploys OrcaSonarStatefulStack: beta, gamma, then prod after approval. */
+/** Deploys OrcaSonarStatefulStack: beta, then prod after approval. */
 export class StatefulStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: cdk.StackProps) {
     super(scope, id, props);
@@ -32,7 +32,6 @@ export class StatefulStack extends cdk.Stack {
       stackName: STATEFUL_STACK_NAME,
       stackProps: {
         beta: getOrcaSonarStatefulStackProps('BETA'),
-        gamma: getOrcaSonarStatefulStackProps('GAMMA'),
         prod: getOrcaSonarStatefulStackProps('PROD'),
       },
       environments: STAGE_ENVIRONMENTS,

@@ -44,7 +44,6 @@ const build = (overrides: Partial<DeploymentPipelineProps<SampleStackProps>> = {
     stackName: 'UMCCR-SampleStack',
     stackProps: {
       beta: { greeting: 'beta' },
-      gamma: { greeting: 'gamma' },
       prod: { greeting: 'prod' },
     },
     environments: ENVIRONMENTS,
@@ -84,22 +83,23 @@ describe('DeploymentPipeline', () => {
     }
   );
 
-  test('deploys beta, then gamma, then prod after PromoteToProd', () => {
+  test('deploys beta, then prod, which starts with PromoteToProd', () => {
     expect(pipeline.Name).toBe('UMCCR-Sample');
     expect(pipeline.Stages.map((stage) => stage.Name)).toEqual([
       'Source',
       'Build',
       'UpdatePipeline',
       'Beta',
-      'Gamma',
       'Prod',
     ]);
-    const gamma = pipeline.Stages.find((stage) => stage.Name === 'Gamma')!.Actions;
-    const approval = gamma.find((action) => action.Name === PROMOTE_TO_PROD)!;
+    const prod = pipeline.Stages.find((stage) => stage.Name === 'Prod')!.Actions;
+    const approval = prod.find((action) => action.Name === PROMOTE_TO_PROD)!;
     expect(approval.TimeoutInMinutes).toBe(60);
-    for (const action of gamma.filter((candidate) => candidate !== approval)) {
-      expect(action.RunOrder!).toBeLessThan(approval.RunOrder!);
+    for (const action of prod.filter((candidate) => candidate !== approval)) {
+      expect(action.RunOrder!).toBeGreaterThan(approval.RunOrder!);
     }
+    const beta = pipeline.Stages.find((stage) => stage.Name === 'Beta')!.Actions;
+    expect(beta.map((action) => action.Name)).not.toContain(PROMOTE_TO_PROD);
   });
 
   test('runs the tests before synth', () => {
@@ -143,7 +143,7 @@ describe('DeploymentPipeline', () => {
   test('names nothing after OrcaBus', () => {
     const assembly = app.synth();
     const templates = assembly.stacksRecursively.map((stack) => JSON.stringify(stack.template));
-    expect(templates.length).toBe(4);
+    expect(templates.length).toBe(3);
     for (const text of templates) {
       expect(text.toLowerCase()).not.toContain('orcabus');
     }

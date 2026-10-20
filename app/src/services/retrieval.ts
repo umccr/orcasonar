@@ -1,3 +1,5 @@
+import type { Turn } from './prompt';
+
 /** A passage from the knowledge base, with the metadata the docs export attached to its page. */
 export interface Passage {
   /** The page's `doc_id`: `<site slug>:<path>`. */
@@ -21,6 +23,20 @@ export interface Retriever {
 
 /** Passages for the answer: this many from the reranked, hybrid search. */
 export const ANSWER_PASSAGES = 8;
+
+/** The longest question the API takes, and so the longest query retrieval is sent. */
+export const MAX_QUESTION_CHARACTERS = 2000;
+
+/**
+ * What to search the documentation for. A follow-up such as "and in prod?" names little to search for on its own, so
+ * the question before it comes first, shortened to keep the query within a question's length. Only retrieval uses
+ * this: the model and the guardrail get the conversation and the question as the reader asked it.
+ */
+export const retrievalQuery = (question: string, history: readonly Turn[]): string => {
+  const previous = history.at(-1)?.question;
+  const room = MAX_QUESTION_CHARACTERS - question.length - 1;
+  return previous && room > 0 ? `${previous.slice(0, room)}\n${question}` : question;
+};
 
 /** Citations and search results quote this much of a passage. */
 export const SNIPPET_CHARACTERS = 280;

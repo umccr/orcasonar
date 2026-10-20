@@ -28,7 +28,7 @@ docs site pipeline ─▶ ingest bucket docs/<slug>/ ─▶ (every 15 minutes, i
 | API, authorizer, Lambdas, WAF, ingestion scheduling, budget backstop                         | `OrcaSonarStatelessStack` (`infrastructure/stage/stateless-stack.ts`) |
 | Sonar KMS key, ingest and records buckets, DynamoDB table, managed knowledge base, guardrail | `OrcaSonarStatefulStack` (`infrastructure/stage/stateful-stack.ts`)   |
 | The API and functions (Hono on Node.js 24)                                                   | `app/`                                                                |
-| Pipelines: beta, gamma, then prod after approval                                             | `infrastructure/toolchain/`                                           |
+| Pipelines: beta, then prod after approval                                                    | `infrastructure/toolchain/`                                           |
 
 See [docs/design.md](docs/design.md) for the design and its diagrams, [docs/architecture.md](docs/architecture.md)
 for what is deployed, [docs/api.md](docs/api.md) for the API, [docs/deploy.md](docs/deploy.md) for deploying it and
@@ -58,18 +58,18 @@ stage.
 | Interface     | Value                                                                                                                                   |
 | ------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | Ingest bucket | written to SSM as `/orcasonar/ingest-bucket-name`; the docs publish steps read it                                                       |
-| Writer        | the docs platform's `role/docs/docs-publisher` in the same account, under `docs/` only                                                  |
+| Writer        | the docs platform's `role/docs/docs-publisher` in the same account, under `docs/` only; its own policy grants the access                |
 | Documents     | `docs/<slug>/<path>.md` with `<path>.md.metadata.json` (`doc_id`, `site`, `title`, `url`, `commit`, `updated`, typed string attributes) |
 | API URL       | `https://sonar.<stage>.umccr.org/api/v1`, also written to SSM as `/orcasonar/api-url`                                                   |
-| CORS          | `docs.dev.umccr.org` in beta, `docs.stg.umccr.org` in gamma, `docs.umccr.org` and `docs.prod.umccr.org` in prod                         |
+| CORS          | `docs.dev.umccr.org` in beta, `docs.umccr.org` and `docs.prod.umccr.org` in prod                                                        |
 
 ## Pipelines
 
 Each stack has its own pipeline in the toolchain account, `UMCCR-OrcaSonarStateful` and `UMCCR-OrcaSonarStateless`,
 built by `infrastructure/toolchain/deployment-pipeline.ts`: the construct docs.umccr.org's pipeline uses too, adapted
 from the OrcaBus service template's so that nothing is named for OrcaBus. Each deploys its stack,
-`UMCCR-OrcaSonarStatefulStack` or `UMCCR-OrcaSonarStatelessStack`, to beta (dev), then gamma (stg), then prod after a
-`PromoteToProd` approval, and posts failures to Slack.
+`UMCCR-OrcaSonarStatefulStack` or `UMCCR-OrcaSonarStatelessStack`, to beta (dev), then prod after a `PromoteToProd`
+approval, and posts failures to Slack. The stg account runs no OrcaSonar stage.
 
 ## Development
 

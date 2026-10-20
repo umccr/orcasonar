@@ -117,6 +117,7 @@ export class ScriptedAnswerer implements Answerer {
 
   async *stream(request: AnswerRequest): AsyncIterable<AnswerEvent> {
     this.requests.push(request);
+    yield { type: 'started' };
     for (const piece of this.answer.match(/.{1,16}/g) ?? []) {
       yield { type: 'delta', text: piece };
     }

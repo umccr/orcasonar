@@ -1,14 +1,14 @@
 /*
- * A self-mutating CDK pipeline in the toolchain account that deploys one stack to the beta, gamma and prod accounts,
- * prod after a manual approval.
+ * A self-mutating CDK pipeline in the toolchain account that deploys one stack to the beta and prod accounts, prod
+ * after a manual approval.
  *
  * Adapted from `DeploymentStackPipeline` in OrcaBus's platform-cdk-constructs
  * (https://github.com/OrcaBus/platform-cdk-constructs, packages/deployment-stack-pipeline/pipeline.ts), which fixes
  * OrcaBus names: the stage IDs `OrcaBusBeta`, `OrcaBusGamma` and `OrcaBusProd`, the stack names derived from them, the
- * `umccr-org:Product` tag and the notification rule's prefix. Here the caller names each of them. Other changes: the
- * pipeline has its own artifact bucket and key instead of the OrcaBus shared one, the trigger uses CDK's trigger API,
- * which checks CodePipeline's limits as the pipeline is built, and the drift check, cache and asset-stripping options
- * are left out.
+ * `umccr-org:Product` tag and the notification rule's prefix. Here the caller names each of them. Other changes: there
+ * is no gamma stage, so prod's approval opens the prod stage; the pipeline has its own artifact bucket and key instead
+ * of the OrcaBus shared one; the trigger uses CDK's trigger API, which checks CodePipeline's limits as the pipeline is
+ * built; and the drift check, cache and asset-stripping options are left out.
  *
  * umccr/docs-platform and umccr/orcasonar hold the same copy of this file; keep them in step.
  *
@@ -61,18 +61,17 @@ import {
 } from 'aws-cdk-lib/pipelines';
 import { Construct } from 'constructs';
 
-/** The stages a pipeline deploys to, in order. Prod waits for an approval after gamma. */
-export const DEPLOYMENT_STAGES = ['beta', 'gamma', 'prod'] as const;
+/** The stages a pipeline deploys to, in order. Prod starts with an approval. */
+export const DEPLOYMENT_STAGES = ['beta', 'prod'] as const;
 export type DeploymentStage = (typeof DEPLOYMENT_STAGES)[number];
 
 /** Each stage's ID: the name of its stage in the pipeline, and its part of the stack's construct path. */
 export const DEPLOYMENT_STAGE_IDS: Record<DeploymentStage, string> = {
   beta: 'Beta',
-  gamma: 'Gamma',
   prod: 'Prod',
 };
 
-/** The approval between gamma and prod. */
+/** The approval that opens the prod stage. */
 export const PROMOTE_TO_PROD = 'PromoteToProd';
 
 /**
@@ -174,8 +173,8 @@ export interface DeploymentPipelineProps<P extends StackProps> {
 }
 
 /**
- * A self-mutating pipeline that deploys {@link DeploymentPipelineProps.stack} to beta, then gamma, then, after the
- * `PromoteToProd` approval, prod. Tests run in parallel before synth; failed runs post to the alerts Slack channel.
+ * A self-mutating pipeline that deploys {@link DeploymentPipelineProps.stack} to beta, then, after the `PromoteToProd`
+ * approval, prod. Tests run in parallel before synth; failed runs post to the alerts Slack channel.
  *
  * Needs, in the toolchain account, the SSM parameters `codestar_github_arn` and `/chatbot_arn/slack/alerts-build`;
  * and in each stage account, a CDK bootstrap that trusts the toolchain account.
@@ -266,11 +265,12 @@ export class DeploymentPipeline<P extends StackProps> extends Construct {
         stackName: props.stackName,
         tags,
       } as unknown as P);
+      // The approval is prod's first action, so a timed-out approval fails prod rather than beta.
       cdkPipeline.addStage(
         stage,
-        stageName === 'gamma'
+        stageName === 'prod'
           ? {
-              post: [
+              pre: [
                 new ApprovalStep(PROMOTE_TO_PROD, props.approvalTimeout ?? Duration.minutes(60)),
               ],
             }

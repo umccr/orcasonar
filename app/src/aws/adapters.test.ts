@@ -13,6 +13,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
 import { ApiError } from '../lib/errors';
+import type { AnswerEvent } from '../services/answer';
 import { BedrockAnswerer, KnowledgeBaseIngestion, KnowledgeBaseRetriever } from './bedrock';
 import { DynamoIngestState, DynamoSpendStore } from './dynamodb';
 import { metadataValues, S3DocumentStore } from './s3';
@@ -99,6 +100,7 @@ describe('BedrockAnswerer', () => {
       events.push(event);
     }
     expect(events).toEqual([
+      { type: 'started' },
       { type: 'delta', text: 'Hello ' },
       { type: 'delta', text: 'there [1].' },
       { type: 'usage', usage: { inputTokens: 100, outputTokens: 5 } },
@@ -124,7 +126,23 @@ describe('BedrockAnswerer', () => {
     for await (const event of answerer.stream({ system: 's', messages: [], maxTokens: 10 })) {
       events.push(event);
     }
-    expect(events).toEqual([{ type: 'guardrail' }]);
+    expect(events).toEqual([{ type: 'started' }, { type: 'guardrail' }]);
+  });
+
+  // A refused request bills nothing, so the chat must not hold it against the reader as a started answer.
+  test('reports nothing as started when Bedrock refuses the request', async () => {
+    bedrock
+      .on(ConverseStreamCommand)
+      .rejects(Object.assign(new Error('Too many requests'), { name: 'ThrottlingException' }));
+    const answerer = new BedrockAnswerer(new BedrockRuntimeClient({}), 'm');
+    const events: AnswerEvent[] = [];
+    const streamed = (async () => {
+      for await (const event of answerer.stream({ system: 's', messages: [], maxTokens: 10 })) {
+        events.push(event);
+      }
+    })();
+    await expect(streamed).rejects.toThrow('Too many requests');
+    expect(events).toEqual([]);
   });
 });
 

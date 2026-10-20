@@ -10,23 +10,23 @@ from `umccr/docs-platform`; its guide is
 
 ## What gets deployed
 
-| Piece                                                                                                                                                                                                                                                      | Source                                            | Account                       | Deployed by                                                                        |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------- |
-| Toolchain stack `OrcaSonarStatefulStack`: pipeline `UMCCR-OrcaSonarStateful`                                                                                                                                                                               | `infrastructure/toolchain/stateful-stack.ts`      | toolchain                     | `pnpm cdk-stateful deploy` once, by hand; after that, the pipeline updates itself  |
-| Toolchain stack `OrcaSonarStatelessStack`: pipeline `UMCCR-OrcaSonarStateless`                                                                                                                                                                             | `infrastructure/toolchain/stateless-stack.ts`     | toolchain                     | `pnpm cdk-stateless deploy` once, by hand; after that, the pipeline updates itself |
-| Stateful stage stack: the Sonar KMS key (`alias/orcasonar`), the ingest and records buckets, table `OrcaSonarTable-<stage>`, knowledge base `orcasonar-<stage>` with data source `docs`, guardrail `orcasonar-<stage>`, SSM parameters under `/orcasonar/` | `infrastructure/stage/stateful-stack.ts`          | dev (beta), stg (gamma), prod | the stateful pipeline; beta can also be deployed by hand                           |
-| Stateless stage stack: the API at `sonar.<stage zone>` with WAF and the authorizer, the chat and query functions, ingestion scheduling, budget `orcasonar-bedrock-<stage>` with its action, alarms, SSM `/orcasonar/api-url`                               | `infrastructure/stage/stateless-stack.ts`, `app/` | dev (beta), stg (gamma), prod | the stateless pipeline; beta can also be deployed by hand                          |
+| Piece                                                                                                                                                                                                                                                      | Source                                            | Account          | Deployed by                                                                        |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ---------------- | ---------------------------------------------------------------------------------- |
+| Toolchain stack `OrcaSonarStatefulStack`: pipeline `UMCCR-OrcaSonarStateful`                                                                                                                                                                               | `infrastructure/toolchain/stateful-stack.ts`      | toolchain        | `pnpm cdk-stateful deploy` once, by hand; after that, the pipeline updates itself  |
+| Toolchain stack `OrcaSonarStatelessStack`: pipeline `UMCCR-OrcaSonarStateless`                                                                                                                                                                             | `infrastructure/toolchain/stateless-stack.ts`     | toolchain        | `pnpm cdk-stateless deploy` once, by hand; after that, the pipeline updates itself |
+| Stateful stage stack: the Sonar KMS key (`alias/orcasonar`), the ingest and records buckets, table `OrcaSonarTable-<stage>`, knowledge base `orcasonar-<stage>` with data source `docs`, guardrail `orcasonar-<stage>`, SSM parameters under `/orcasonar/` | `infrastructure/stage/stateful-stack.ts`          | dev (beta), prod | the stateful pipeline; beta can also be deployed by hand                           |
+| Stateless stage stack: the API at `sonar.<stage zone>` with WAF and the authorizer, the chat and query functions, ingestion scheduling, budget `orcasonar-bedrock-<stage>` with its action, alarms and the alerts topic, SSM `/orcasonar/api-url`          | `infrastructure/stage/stateless-stack.ts`, `app/` | dev (beta), prod | the stateless pipeline; beta can also be deployed by hand                          |
 
 The stage stacks are CloudFormation stacks `UMCCR-OrcaSonarStatefulStack` and `UMCCR-OrcaSonarStatelessStack`,
 the same names in every stage account, tagged `umccr-org:Product: OrcaSonar`. `cdk deploy` selects them by construct
-path, such as `OrcaSonarStatefulStack/DeploymentPipeline/<Stage>/OrcaSonarStatefulStack`, with `<Stage>` one of
-`Beta` (dev), `Gamma` (stg) and `Prod`, which also name the pipelines' stages. Both pipelines are built by
+path, such as `OrcaSonarStatefulStack/DeploymentPipeline/<Stage>/OrcaSonarStatefulStack`, with `<Stage>` either
+`Beta` (dev) or `Prod`, which also name the pipelines' stages; the stg account runs no OrcaSonar stage. Both pipelines are built by
 `infrastructure/toolchain/deployment-pipeline.ts`, the construct docs.umccr.org's pipeline uses too, adapted from the
 OrcaBus one so that nothing is named for OrcaBus. The stateless stack reads the stateful stack's resources from the SSM parameters it writes, so **in every account the
 stateful stack deploys first**.
 
-Each pipeline builds `umccr/orcasonar` `main`, runs the tests, deploys beta, then gamma, then waits at
-**PromoteToProd** for approval before prod. Changes start one pipeline or both:
+Each pipeline builds `umccr/orcasonar` `main`, runs the tests, deploys beta, then waits at **PromoteToProd**, the
+first action of its prod stage, for approval. Changes start one pipeline or both:
 
 | A change to                                                                                             | Starts                 |
 | ------------------------------------------------------------------------------------------------------- | ---------------------- |
@@ -47,7 +47,8 @@ A read-only check of the toolchain and dev accounts, which changed nothing, foun
 | OrcaSonar       | the toolchain stacks are deployed (2026-10-13): pipelines `UMCCR-OrcaSonarStateful` and `UMCCR-OrcaSonarStateless` exist, and fail at Source because `umccr/orcasonar` on GitHub has no `main` yet | both stage stacks deployed by hand from the branch (step 3), the stateless one last on 2026-10-15; `cdk diff --method template` is clean for both. The knowledge base holds `/platform/`'s documents, `/health` and the API docs answer, and the chat answers questions                                                                                                                      |
 | Still to decide |                                                                                                                                                                                                    | Bedrock's data-retention mode was `inherit`, not `none`, on 2026-10-12 (step 1); API Gateway's account-level CloudWatch role is set, by another stack, so `accessLogs` can be turned on for beta                                                                                                                                                                                             |
 
-stg and prod were not checked.
+stg runs no OrcaSonar stage. A read-only check on 2026-10-21 found no OrcaSonar resources in stg or prod, and in
+prod the Claude Sonnet 5 agreement not yet accepted (`agreementAvailability` `NOT_AVAILABLE`; [model access](#model-access)).
 
 ## Before you start
 
@@ -63,7 +64,7 @@ stg and prod were not checked.
 | The AWS Connector app's repository access                                  | an owner of the umccr GitHub organisation                                                                  |
 
 The examples use the SSO profiles `bastion-admin` for the toolchain account and `dev` for the dev account; use
-yours if they are named differently, and the stg and prod profiles for those stages.
+yours if they are named differently, and the prod profile for prod.
 
 ```sh
 aws sso login --profile bastion-admin && export AWS_PROFILE=bastion-admin   # the toolchain account
@@ -82,10 +83,10 @@ aws sts get-caller-identity --query Account --output text                   # ch
    Cognito client
 2. Pre-flight checks, read-only: the toolchain account and each stage account
 3. dev, optional: deploy both stage stacks by hand from the branch, and try them
-4. Push main, then deploy the stateful pipeline; wait until it has deployed beta (and gamma)
+4. Push main, then deploy the stateful pipeline; wait until it has deployed beta
 5. Deploy the stateless pipeline
 6. Connect docs.umccr.org: documents, then the chat
-7. stg and prod: steps 1 and 2 there, then PromoteToProd on the stateful pipeline, then on the stateless one
+7. prod: steps 1 and 2 there, then PromoteToProd on the stateful pipeline, then on the stateless one
 ```
 
 ---
@@ -140,7 +141,7 @@ What an agreement covers:
 
 | Scope             | Covered?                                                                                                                                                                                                                            |
 | ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The account       | yes, that account only. dev, stg and prod each accept for themselves                                                                                                                                                                |
+| The account       | yes, that account only. dev and prod each accept for themselves                                                                                                                                                                     |
 | The model         | that model only. Claude Sonnet 5 and Claude Haiku 4.5, which `config.ts` uses, need one each. Claude Sonnet 5.5 and Claude Haiku 5.5 have active `au.` profiles too, and need their own agreements before `config.ts` moves to them |
 | The Region        | every Region where the model is offered, so Sydney and Melbourne alike                                                                                                                                                              |
 | The use-case form | every Anthropic model, once per account. Submitted in the organisation's management account, it covers every member account. Melbourne is an opt-in Region, where AWS may ask for the form again                                    |
@@ -231,7 +232,6 @@ the three permissions above), and who may accept licence terms for UMCCR, or has
 | Stage | Use-case form                                    | Claude Sonnet 5       | Claude Haiku 4.5      |
 | ----- | ------------------------------------------------ | --------------------- | --------------------- |
 | dev   | submitted in both Regions (2026-10-15)           | accepted (2026-10-15) | accepted (2026-10-15) |
-| stg   | inherited if the management account submitted it | to do                 | to do                 |
 | prod  | inherited if the management account submitted it | to do                 | to do                 |
 
 To stop the account using a model later, deny it in IAM or with a service control policy. Deleting the agreement
@@ -300,8 +300,21 @@ already set:
 aws apigateway get-account --query cloudwatchRoleArn --output text   # None: not set
 ```
 
-If it is set, `accessLogs: true` in `getOrcaSonarStatelessStackProps` (`infrastructure/stage/config.ts`) turns the
-logs on. It is the same for every stage today; make it per stage if only some accounts have the role.
+If it is set, the stage's entry in `ACCESS_LOGS` (`infrastructure/stage/config.ts`) can turn the access logs on;
+without the role, the stage's deploy fails. dev's are on; prod's wait for this check.
+
+### Alerts
+
+Every alarm, and the budget's notices, go to one SNS topic in each stage: the stateless stack's `AlertsTopicArn`
+output. Nobody hears them until someone subscribes, so before prod do one of these:
+
+- **Email**: add a team address, rather than a person's, to the stage's `ALERT_EMAILS` in
+  `infrastructure/stage/config.ts`. After the deploy, the address receives a request to confirm the subscription,
+  and hears nothing until someone confirms it.
+- **Slack**: in the stage account's AWS Chatbot console, add the topic to the Slack channel configuration that should
+  hear it.
+
+The [verification checklist](#verification-checklist) then checks that an alarm reaches someone.
 
 ## Step 2: Pre-flight checks
 
@@ -399,8 +412,6 @@ The pipelines build `umccr/orcasonar` `main`. Before deploying them:
 - **GitHub access**: if the organisation's AWS Connector for GitHub app is installed for selected repositories only,
   an organisation owner adds `umccr/orcasonar` under **Settings → GitHub Apps → AWS Connector for GitHub →
   Configure**.
-- **stg**: steps 1 and 2 in the stg account. Otherwise gamma fails; that stops the run before prod and does no other
-  harm, and a run after the fix deploys gamma.
 
 ```sh
 cd orcasonar
@@ -416,9 +427,8 @@ The pipeline starts as soon as it exists:
 
 ```text
 Source (main) ─▶ unit tests (pnpm test) ─▶ synth ─▶ self-update ─▶ assets
-  ─▶ Beta:  UMCCR-OrcaSonarStatefulStack in dev
-  ─▶ Gamma: UMCCR-OrcaSonarStatefulStack in stg
-  ─▶ PromoteToProd (approval) ─▶ Prod: UMCCR-OrcaSonarStatefulStack in prod
+  ─▶ Beta: UMCCR-OrcaSonarStatefulStack in dev
+  ─▶ Prod: PromoteToProd (approval), then UMCCR-OrcaSonarStatefulStack in prod
 ```
 
 **PromoteToProd** waits 60 minutes, then fails the run, so that an unanswered approval never holds back newer runs.
@@ -446,8 +456,8 @@ aws bedrock get-guardrail --guardrail-identifier \
 
 ## Step 5: The stateless pipeline
 
-Once the stateful pipeline has deployed beta, and gamma if stg is ready: the stateless stack's deploy in a stage
-fails while that stage has no `/orcasonar/` parameters.
+Once the stateful pipeline has deployed beta: the stateless stack's deploy in a stage fails while that stage has no
+`/orcasonar/` parameters.
 
 ```sh
 pnpm cdk-stateless diff OrcaSonarStatelessStack --method template
@@ -527,22 +537,21 @@ unset TOKEN
 
 The stream is `meta`, then `delta` events, then `citations` and `done`, as [api.md](api.md) describes.
 
-## Step 7: stg and prod
+## Step 7: prod
 
-1. **Prerequisites**: steps 1 and 2 in the stg and prod accounts, including the docs platform's Cognito client in
-   their `cognito_aai` workspaces.
-2. **Gamma**: if gamma failed before stg was ready, start the pipelines again, stateful first, with toolchain
-   credentials:
+1. **Prerequisites**: steps 1 and 2 in the prod account, including the docs platform's Cognito client in its
+   `cognito_aai` workspace.
+2. **Prod**: approve **PromoteToProd** on `UMCCR-OrcaSonarStateful` first, the first action of its prod stage, in the
+   toolchain account's CodePipeline console, within 60 minutes of the run reaching it. Otherwise start the pipeline
+   again, with toolchain credentials:
 
    ```sh
    aws codepipeline start-pipeline-execution --name UMCCR-OrcaSonarStateful
-   aws codepipeline start-pipeline-execution --name UMCCR-OrcaSonarStateless   # after gamma's stateful deploy
    ```
 
-3. **Prod**: approve **PromoteToProd** on `UMCCR-OrcaSonarStateful` first, in the toolchain account's CodePipeline
-   console, within 60 minutes of the run reaching it (otherwise start the pipeline again, as in item 2). Once its
-   prod stage is done, approve the stateless pipeline's the same way.
-4. **Check** prod as in steps 4 to 6, with `https://sonar.prod.umccr.org/api/v1` and the prod docs hosts.
+   Once its prod stage is done, approve the stateless pipeline's the same way (`UMCCR-OrcaSonarStateless`).
+
+3. **Check** prod as in steps 4 to 6, with `https://sonar.prod.umccr.org/api/v1` and the prod docs hosts.
 
 In prod, the stateful stack's KMS key, buckets and table are retained if the stack is deleted, and the table has
 deletion protection.
@@ -550,7 +559,7 @@ deletion protection.
 ## Later deploys
 
 Merge to `main`; the table under [What gets deployed](#what-gets-deployed) says which pipeline starts. Both deploy
-beta and gamma, then wait for **PromoteToProd**. When a change touches both stacks and the stateless one needs the
+beta, then wait for **PromoteToProd**. When a change touches both stacks and the stateless one needs the
 stateful one's new resources, approve the stateful pipeline's prod stage first.
 
 Changes that need care:
@@ -584,6 +593,9 @@ Before calling a stage done:
 - [ ] The alarms exist and are `OK`:
       `aws cloudwatch describe-alarms --alarm-name-prefix UMCCR-OrcaSonar --query 'MetricAlarms[].[AlarmName, StateValue]'`
       in the stage account.
+- [ ] An alarm reaches the alerts topic's subscribers ([Alerts](#alerts)), as it fires and as it returns to `OK` at
+      its next evaluation:
+      `aws cloudwatch set-alarm-state --alarm-name <one of them> --state-value ALARM --state-reason 'Checking alerts'`
 
 ## Troubleshooting
 
@@ -626,7 +638,7 @@ deletion protection; remove those by hand only after a deliberate decision.
    pnpm cdk-stateful destroy 'OrcaSonarStatefulStack/DeploymentPipeline/Beta/OrcaSonarStatefulStack'
    ```
 
-   (`Gamma` in the path for stg.) Outside prod, the stateful stack deletes its buckets, so empty them first, every object
+   (`Prod` in the path for prod.) Outside prod, the stateful stack deletes its buckets, so empty them first, every object
    version included: CloudFormation cannot delete a bucket that holds objects. The KMS key is scheduled for
    deletion, and its alias is removed.
 

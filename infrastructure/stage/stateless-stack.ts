@@ -21,6 +21,7 @@ import {
 import { CfnBudget, CfnBudgetsAction } from 'aws-cdk-lib/aws-budgets';
 import { Certificate } from 'aws-cdk-lib/aws-certificatemanager';
 import { Alarm, ComparisonOperator, Stats, TreatMissingData } from 'aws-cdk-lib/aws-cloudwatch';
+import { SnsAction } from 'aws-cdk-lib/aws-cloudwatch-actions';
 import { Table } from 'aws-cdk-lib/aws-dynamodb';
 import { Rule, Schedule } from 'aws-cdk-lib/aws-events';
 import { LambdaFunction } from 'aws-cdk-lib/aws-events-targets';
@@ -35,11 +36,18 @@ import {
 import { Key } from 'aws-cdk-lib/aws-kms';
 import { Architecture, Runtime } from 'aws-cdk-lib/aws-lambda';
 import { NodejsFunction, OutputFormat } from 'aws-cdk-lib/aws-lambda-nodejs';
-import { FilterPattern, LogGroup, MetricFilter, RetentionDays } from 'aws-cdk-lib/aws-logs';
+import {
+  FilterPattern,
+  IFilterPattern,
+  LogGroup,
+  MetricFilter,
+  RetentionDays,
+} from 'aws-cdk-lib/aws-logs';
 import { ARecord, HostedZone, RecordTarget } from 'aws-cdk-lib/aws-route53';
 import { ApiGatewayDomain } from 'aws-cdk-lib/aws-route53-targets';
 import { Bucket } from 'aws-cdk-lib/aws-s3';
 import { Topic } from 'aws-cdk-lib/aws-sns';
+import { EmailSubscription } from 'aws-cdk-lib/aws-sns-subscriptions';
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import { CfnWebACL, CfnWebACLAssociation } from 'aws-cdk-lib/aws-wafv2';
 import { Construct } from 'constructs';
@@ -68,7 +76,7 @@ export interface OrcaSonarBudget {
 }
 
 export interface OrcaSonarStatelessStackProps extends StackProps {
-  /** `beta`, `gamma` or `prod`, for names and logs. */
+  /** `beta` or `prod`, for names and logs. */
   readonly stageSlug: string;
   /** Origins whose pages may call the API from the browser: the docs hosts. */
   readonly corsAllowOrigins: string[];
@@ -84,6 +92,8 @@ export interface OrcaSonarStatelessStackProps extends StackProps {
   /** REST API access logs need API Gateway's account-level CloudWatch role; turn them on where it exists. */
   readonly accessLogs: boolean;
   readonly logRetention: RetentionDays;
+  /** Addresses that hear the alarms and the budget's notices by email; each confirms its subscription once. */
+  readonly alertEmails: string[];
 }
 
 const NODE_RUNTIME = Runtime.NODEJS_24_X;
@@ -197,7 +207,8 @@ const staticGet = (
  *
  * Only routes that need a token reach a function: the open ones are answered by API Gateway from mock integrations.
  * A REST API rather than the HTTP API OrcaBus services use, because HTTP APIs cannot stream and stop at 30 seconds.
- * The functions run outside the VPC: they call nothing but AWS APIs.
+ * The functions run outside the VPC: they call nothing but AWS APIs. Every alarm, and the budget's notices, go to one
+ * alerts topic.
  */
 export class OrcaSonarStatelessStack extends Stack {
   constructor(scope: Construct, id: string, props: OrcaSonarStatelessStackProps) {
@@ -299,20 +310,18 @@ export class OrcaSonarStatelessStack extends Stack {
       },
     });
 
+    const alerts = this.alertsTopic(props);
     const api = this.api(props, { chat, query, authorizerFunction, domainName });
     this.firewall(api);
     this.ingestion(props, { table, ingestBucket, knowledgeBaseArn, knowledgeBaseId });
-    this.budget(props, chat.role as Role);
+    this.budget(props, chat.role as Role, alerts);
+    this.alarms(api, { chat, query });
 
-    for (const [name, fn] of Object.entries({ Chat: chat, Query: query })) {
-      new Alarm(this, `${name}ErrorsAlarm`, {
-        alarmDescription: `OrcaSonar ${name.toLowerCase()} Lambda errors`,
-        metric: fn.metricErrors({ period: Duration.minutes(5) }),
-        threshold: 5,
-        evaluationPeriods: 1,
-        comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
-        treatMissingData: TreatMissingData.NOT_BREACHING,
-      });
+    // Every alarm tells the alerts topic when it fires and when it clears.
+    const notify = new SnsAction(alerts);
+    for (const alarm of this.node.findAll().filter((child) => child instanceof Alarm)) {
+      alarm.addAlarmAction(notify);
+      alarm.addOkAction(notify);
     }
 
     new StringParameter(this, 'ApiUrlParameter', {
@@ -502,11 +511,19 @@ export class OrcaSonarStatelessStack extends Stack {
 
   /** AWS managed rules and a per-address rate limit, in front of the whole API. */
   private firewall(api: RestApi): void {
-    const managed = (name: string, priority: number) => ({
+    const managed = (name: string, priority: number, countOnly: string[] = []) => ({
       name,
       priority,
       overrideAction: { none: {} },
-      statement: { managedRuleGroupStatement: { vendorName: 'AWS', name } },
+      statement: {
+        managedRuleGroupStatement: {
+          vendorName: 'AWS',
+          name,
+          ruleActionOverrides: countOnly.length
+            ? countOnly.map((rule) => ({ name: rule, actionToUse: { count: {} } }))
+            : undefined,
+        },
+      },
       visibilityConfig: {
         cloudWatchMetricsEnabled: true,
         metricName: name,
@@ -523,7 +540,14 @@ export class OrcaSonarStatelessStack extends Stack {
       },
       rules: [
         managed('AWSManagedRulesAmazonIpReputationList', 0),
-        managed('AWSManagedRulesCommonRuleSet', 1),
+        // Questions are text for the model, never paths, pages or addresses this API opens. These rules would block
+        // readers asking about `../` links, HTML or internal addresses, so they only count.
+        managed('AWSManagedRulesCommonRuleSet', 1, [
+          'GenericLFI_BODY',
+          'GenericRFI_BODY',
+          'CrossSiteScripting_BODY',
+          'EC2MetaDataSSRF_BODY',
+        ]),
         managed('AWSManagedRulesKnownBadInputsRuleSet', 2),
         {
           name: 'RateLimitPerAddress',
@@ -541,6 +565,83 @@ export class OrcaSonarStatelessStack extends Stack {
     new CfnWebACLAssociation(this, 'WebAclAssociation', {
       resourceArn: api.deploymentStage.stageArn,
       webAclArn: acl.attrArn,
+    });
+  }
+
+  /**
+   * The API's alarms. The functions answer their own errors, a streamed answer's after its 200 has gone, so Lambda
+   * errors count only crashes and timeouts. Failed answers are counted from the outcomes the chat function logs, and
+   * failed searches, documents and feedback from the API's 5XX responses.
+   */
+  private alarms(api: RestApi, fns: { chat: NodejsFunction; query: NodejsFunction }): void {
+    for (const [name, fn] of Object.entries({ Chat: fns.chat, Query: fns.query })) {
+      new Alarm(this, `${name}ErrorsAlarm`, {
+        alarmDescription: `OrcaSonar ${name.toLowerCase()} Lambda errors: crashes and timeouts`,
+        metric: fn.metricErrors({ period: Duration.minutes(5) }),
+        threshold: 5,
+        evaluationPeriods: 1,
+        comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: TreatMissingData.NOT_BREACHING,
+      });
+    }
+
+    const outcome = (value: string) => FilterPattern.stringValue('$.outcome', '=', value);
+    this.outcomeAlarm('AnswersFailed', fns.chat, {
+      description:
+        'OrcaSonar answers failed: readers saw an error instead of an answer. ' +
+        'The chat function logs why, as outcome stream-error, answer-error or error.',
+      pattern: FilterPattern.any(
+        FilterPattern.all(
+          FilterPattern.any(outcome('stream-error'), outcome('answer-error')),
+          // A failure of ours, not a reader's own mistake such as asking in someone else's conversation.
+          FilterPattern.stringValue('$.code', '=', 'unavailable')
+        ),
+        outcome('error')
+      ),
+      threshold: 3,
+      period: Duration.minutes(15),
+    });
+    this.outcomeAlarm('WritesFailed', fns.chat, {
+      description:
+        "OrcaSonar could not settle an answer's cost, or save its turn or record. " +
+        'The chat function logs which, as outcome settle-error or write-error.',
+      pattern: FilterPattern.any(outcome('settle-error'), outcome('write-error')),
+      threshold: 1,
+      period: Duration.hours(1),
+    });
+
+    new Alarm(this, 'ApiServerErrorsAlarm', {
+      alarmDescription:
+        'OrcaSonar API 5XX responses: searches, documents or feedback that failed, ' +
+        'or answers that failed before they started streaming',
+      metric: api.metricServerError({ period: Duration.minutes(15), statistic: Stats.SUM }),
+      threshold: 3,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
+    });
+  }
+
+  /** An alarm on an outcome a function logs itself, counted as a metric in the `OrcaSonar` namespace. */
+  private outcomeAlarm(
+    name: string,
+    fn: NodejsFunction,
+    options: { description: string; pattern: IFilterPattern; threshold: number; period: Duration }
+  ): void {
+    const logged = new MetricFilter(this, `${name}Metric`, {
+      logGroup: fn.logGroup,
+      metricNamespace: 'OrcaSonar',
+      metricName: name,
+      filterPattern: options.pattern,
+      metricValue: '1',
+    });
+    new Alarm(this, `${name}Alarm`, {
+      alarmDescription: options.description,
+      metric: logged.metric({ period: options.period, statistic: Stats.SUM }),
+      threshold: options.threshold,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
     });
   }
 
@@ -580,6 +681,16 @@ export class OrcaSonarStatelessStack extends Stack {
         },
       },
       targets: [new LambdaFunction(mark)],
+    });
+    // EventBridge invokes it asynchronously: up to three attempts for one change.
+    new Alarm(this, 'IngestMarkErrorsAlarm', {
+      alarmDescription:
+        'OrcaSonar could not mark the index stale: a document change waits for the next one',
+      metric: mark.metricErrors({ period: Duration.hours(1) }),
+      threshold: 3,
+      evaluationPeriods: 1,
+      comparisonOperator: ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: TreatMissingData.NOT_BREACHING,
     });
 
     const run = this.function('IngestRunFunction', 'ingest-run.ts', props, {
@@ -631,13 +742,13 @@ export class OrcaSonarStatelessStack extends Stack {
   }
 
   /**
-   * The backstop behind the budget the chat Lambda enforces itself: an AWS Budgets limit on Bedrock spend that, when
-   * actual spend passes it, attaches a policy denying Bedrock to the chat role. Budgets data updates only a few times
-   * a day, so the Lambda's own ledger is the real control.
+   * Where every alarm, and the budget's notices, go. Subscribe a team address by email (`alertEmails` in config.ts), or
+   * add the topic to the account's AWS Chatbot channel for Slack (docs/deploy.md). The construct ID is kept from when
+   * the topic carried only the budget's notices, so that neither it nor the budget and action naming it are replaced.
    */
-  private budget(props: OrcaSonarStatelessStackProps, chatRole: Role): void {
+  private alertsTopic(props: OrcaSonarStatelessStackProps): Topic {
     const topic = new Topic(this, 'BudgetTopic', {
-      displayName: 'OrcaSonar budget',
+      displayName: 'OrcaSonar alerts',
       enforceSSL: true,
     });
     topic.addToResourcePolicy(
@@ -648,7 +759,29 @@ export class OrcaSonarStatelessStack extends Stack {
         conditions: { StringEquals: { 'aws:SourceAccount': this.account } },
       })
     );
+    // The topic's own policy replaces SNS's default one, which let the account's alarms publish.
+    const alarms = `arn:${Aws.PARTITION}:cloudwatch:${this.region}:${this.account}:alarm:*`;
+    topic.addToResourcePolicy(
+      new PolicyStatement({
+        actions: ['sns:Publish'],
+        principals: [new ServicePrincipal('cloudwatch.amazonaws.com')],
+        resources: [topic.topicArn],
+        conditions: { ArnLike: { 'aws:SourceArn': alarms } },
+      })
+    );
+    for (const address of props.alertEmails) {
+      topic.addSubscription(new EmailSubscription(address));
+    }
+    new CfnOutput(this, 'AlertsTopicArn', { value: topic.topicArn });
+    return topic;
+  }
 
+  /**
+   * The backstop behind the budget the chat Lambda enforces itself: an AWS Budgets limit on Bedrock spend that, when
+   * actual spend passes it, attaches a policy denying Bedrock to the chat role. Budgets data updates only a few times
+   * a day, so the Lambda's own ledger is the real control. Its notices go to the alerts topic.
+   */
+  private budget(props: OrcaSonarStatelessStackProps, chatRole: Role, topic: Topic): void {
     const budget = new CfnBudget(this, 'Budget', {
       budget: {
         budgetName: `orcasonar-bedrock-${props.stageSlug}`,

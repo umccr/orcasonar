@@ -90,18 +90,18 @@ flowchart TB
 
 Release 1 has one caller; the later ones are drawn to make room for them, not because they are planned for a date.
 
-| Part                   | What it does, and why                                                                                                                                                                                                                                                                   |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| AWS WAF                | AWS managed rule groups and a rate limit per address. An allowlist of university and VPN ranges can be added if a review asks for one; it would also block readers at home without the VPN.                                                                                             |
-| API Gateway REST API   | Regional, with the custom domain on the certificate and hosted zone each stage already has. A REST API rather than the HTTP API OrcaBus services use, because HTTP APIs can't stream and stop at 30 seconds. Answers the open routes itself.                                            |
-| Lambda authorizer      | Verifies the Cognito ID token with `aws-jwt-verify`: the `data-portal-<stage>` pool, token use `id`, and an allowed client. Release 1 allows only `docs-app`; the `docs-app` client never goes on the OrcaBus API list.                                                                 |
-| Chat Lambda            | Holds the most an answer can cost against the budget, retrieves, builds the prompt, calls Claude with the guardrail, streams server-sent events, then settles the hold at the answer's cost and records the exchange. Logs hold the reader's `sub` and the outcome, never the question. |
-| Query Lambda           | `/search`, `/documents/{id}` and `/feedback`, answered as ordinary JSON.                                                                                                                                                                                                                |
-| Sonar table            | One DynamoDB table: spend per reader per day, team spend per month, conversation turns (expire after 30 days) and the ingestion state. Callers are keyed by `sub` for people and by client ID for machine callers.                                                                      |
-| Ingest bucket          | The only input to the knowledge base. Only the docs pipeline's `docs-publisher` role writes, and only under `docs/`. Versioned, so an accidental delete is recoverable.                                                                                                                 |
-| Managed knowledge base | One per stage: managed embeddings, hybrid search and the managed reranker. Each passage keeps its page's `doc_id`, `url`, `site` and `title`, so sources become links and a question can stay within one site.                                                                          |
-| Guardrail              | Applied to every model call: denied topics (medical advice about a person, personal data about patients), masking of personal data in answers, and a grounding check that flags answers the passages don't support.                                                                     |
-| Claude Sonnet 5        | Called through the `au.` inference profile, which runs only in Sydney and Melbourne. Haiku 4.5 is the cheaper option if its answers are good enough.                                                                                                                                    |
+| Part                   | What it does, and why                                                                                                                                                                                                                                                                                                                                        |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| AWS WAF                | AWS managed rule groups and a rate limit per address. The common rules that look for paths, HTML and addresses in a request body only count, since questions about `../` links, HTML tags and internal URLs trip them. An allowlist of university and VPN ranges can be added if a review asks for one; it would also block readers at home without the VPN. |
+| API Gateway REST API   | Regional, with the custom domain on the certificate and hosted zone each stage already has. A REST API rather than the HTTP API OrcaBus services use, because HTTP APIs can't stream and stop at 30 seconds. Answers the open routes itself.                                                                                                                 |
+| Lambda authorizer      | Verifies the Cognito ID token with `aws-jwt-verify`: the `data-portal-<stage>` pool, token use `id`, and an allowed client. Release 1 allows only `docs-app`; the `docs-app` client never goes on the OrcaBus API list.                                                                                                                                      |
+| Chat Lambda            | Holds the most an answer can cost against the budget, retrieves, builds the prompt, calls Claude with the guardrail, streams server-sent events, then settles the hold at the answer's cost and records the exchange. Logs hold the reader's `sub` and the outcome, never the question.                                                                      |
+| Query Lambda           | `/search`, `/documents/{id}` and `/feedback`, answered as ordinary JSON.                                                                                                                                                                                                                                                                                     |
+| Sonar table            | One DynamoDB table: spend per reader per day, team spend per month, conversation turns (expire after 30 days) and the ingestion state. Callers are keyed by `sub` for people and by client ID for machine callers.                                                                                                                                           |
+| Ingest bucket          | The only input to the knowledge base. Only the docs pipeline's `docs-publisher` role writes, and only under `docs/`. Versioned, so an accidental delete is recoverable.                                                                                                                                                                                      |
+| Managed knowledge base | One per stage: managed embeddings, hybrid search and the managed reranker. Each passage keeps its page's `doc_id`, `url`, `site` and `title`, so sources become links and a question can stay within one site.                                                                                                                                               |
+| Guardrail              | Applied to every model call: denied topics (medical advice about a person, personal data about patients), masking of personal data in answers, and a grounding check that flags answers the passages don't support.                                                                                                                                          |
+| Claude Sonnet 5        | Called through the `au.` inference profile, which runs only in Sydney and Melbourne. Haiku 4.5 is the cheaper option if its answers are good enough.                                                                                                                                                                                                         |
 
 ## What a request can reach
 
@@ -181,7 +181,7 @@ sequenceDiagram
     else within both
         Chat-->>Panel: event: meta {exchangeId, conversationId}
         Chat->>Table: the conversation's last 6 turns
-        Chat->>KB: Retrieve: the question, top 8, the sites asked about
+        Chat->>KB: Retrieve: the question (a follow-up with the one before), top 8, the sites asked about
         KB-->>Chat: passages with doc_id, url, title, score
         alt no passages
             Chat-->>Panel: the documentation doesn't cover it, with no model call
@@ -366,10 +366,9 @@ flowchart LR
     push["Push to main"] --> test["Tests: infrastructure,<br/>app and cdk-nag"]
     test --> synth["Synth"]
     synth --> beta["Beta<br/>dev account"]
-    beta --> gamma["Gamma<br/>stg account"]
-    gamma --> approve{"PromoteToProd<br/>approval"}
+    beta --> approve{"PromoteToProd<br/>approval"}
     approve --> prod["Prod<br/>prod account"]
-    test & synth & beta & gamma & prod -. "failures" .-> slack["Slack alerts"]
+    test & synth & beta & prod -. "failures" .-> slack["Slack alerts"]
 ```
 
 | Stack                     | Holds                                                                                                                                                       | Why it is separate                                   |
@@ -389,9 +388,11 @@ What it reads and writes in SSM:
 | `/orcasonar/api-url`                               | written   | the docs theme's `env.js`                                |
 | `/orcasonar/*`, the rest                           | written   | the stateless stack finds the stateful stack's resources |
 
-Watching it: alarms on chat and query Lambda errors, on failed ingestion scheduling and failed ingestion jobs, the
-budget's 80% warning, and, still to build, a Synthetics canary. A canary on `/health` shows only that the domain, WAF
-and API Gateway are up, so a deeper one waits for a machine client that can call `/chat`.
+Watching it: alarms on failed answers and on writes that the chat Lambda logs rather than throws, on the API's 5XX
+responses, on Lambda crashes and timeouts, and on ingestion that could not be marked, scheduled or completed, beside
+the budget's 80% warning. Each tells one alerts topic as it fires and as it clears, and a team address or an AWS
+Chatbot channel subscribes to it. Still to build: a Synthetics canary. A canary on `/health` shows only that the
+domain, WAF and API Gateway are up, so a deeper one waits for a machine client that can call `/chat`.
 
 ## Delivery
 
@@ -407,11 +408,13 @@ and API Gateway are up, so a deeper one waits for a machine client that can call
 
 To confirm, with the details in [architecture.md](architecture.md#open-items):
 
-1. Anthropic's model agreements in stg and prod, which an account administrator accepts by hand. dev's were accepted,
-   and the organisation's region policy opened ap-southeast-4, on 2026-10-15.
+1. Anthropic's model agreements in prod, which an account administrator accepts by hand: Claude Sonnet 5's was
+   `NOT_AVAILABLE` there on 2026-10-21. dev's were accepted, and the organisation's region policy opened
+   ap-southeast-4, on 2026-10-15.
 2. The data-retention mode and its SCP, set by whoever administers the organisation's Bedrock settings.
 3. Where the managed knowledge base's embedding and reranking models run.
-4. Whether the budget backstop sees Claude's cost, which is billed through AWS Marketplace, and who hears its alerts.
+4. Whether the budget backstop sees Claude's cost, which is billed through AWS Marketplace, and who subscribes to the
+   alerts topic.
 5. Whether a security review wants the WAF allowlist or the VPC endpoints.
 
 ## Sources

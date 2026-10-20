@@ -2,6 +2,7 @@ import { createApp } from './app';
 import { errorDetail } from './lib/errors';
 import type { AnswerEvent } from './services/answer';
 import { ANSWER_HOLD_USD, spendKeys } from './services/budget';
+import { RETRIEVAL_USD } from './services/pricing';
 import type { FakeDeps } from './testing/fakes';
 import { fakeDeps, ScriptedAnswerer } from './testing/fakes';
 
@@ -52,6 +53,17 @@ class RefusedAnswerer extends ScriptedAnswerer {
       throw refusal;
     }
     yield { type: 'usage', usage: { inputTokens: 0, outputTokens: 0 } };
+  }
+}
+
+/** Fails part way through an answer, after Bedrock accepted the request, as a model stream error does. */
+class BrokenAnswerer extends ScriptedAnswerer {
+  override async *stream(): AsyncIterable<AnswerEvent> {
+    yield { type: 'started' };
+    yield { type: 'delta', text: 'Add one entry' };
+    throw Object.assign(new Error('The model stream failed'), {
+      name: 'ModelStreamErrorException',
+    });
   }
 }
 
@@ -166,8 +178,8 @@ describe('POST /chat, streamed', () => {
       })
     );
     expect(JSON.stringify(deps.logs)).not.toContain('add a site');
-    // The model was called and reported no usage, so the whole hold stays as the cost.
-    expect(await callerSpend(deps)).toBe(ANSWER_HOLD_USD);
+    // Bedrock refused the request before answering, which bills nothing: only the retrieval is spent.
+    expect(await callerSpend(deps)).toBe(RETRIEVAL_USD);
   });
 
   test('continues a conversation with its history, for its owner only', async () => {
@@ -182,6 +194,8 @@ describe('POST /chat, streamed', () => {
     await app.request(post('/chat', { query: 'And then?', conversationId }), undefined, READER);
     const messages = deps.scriptedAnswerer.requests[1]!.messages;
     expect(messages[0]).toEqual({ role: 'user', content: [{ text: 'How do I add a site?' }] });
+    // A follow-up names little to search for, so it is searched for with the question it follows.
+    expect(deps.staticRetriever.calls[1]!.query).toBe('How do I add a site?\nAnd then?');
 
     const other = { requestContext: { authorizer: { sub: 'reader-2', clientId: 'docs-app' } } };
     const stolen = await app.request(
@@ -247,23 +261,58 @@ describe('POST /chat, accounting', () => {
       })
     );
     expect(JSON.stringify(deps.logs)).not.toContain('add a site');
-    expect(await callerSpend(deps)).toBe(ANSWER_HOLD_USD);
+    expect(await callerSpend(deps)).toBe(RETRIEVAL_USD);
   });
 
-  test('settles the answer cost before recording it, so a failed write cannot skip it', async () => {
-    const { app, deps } = setup();
-    deps.recordStore.putExchange = async () => {
-      throw new Error('records bucket unavailable');
-    };
+  test('keeps the whole hold when the answer fails after the model accepted the request', async () => {
+    const { app, deps } = setup({ answerer: new BrokenAnswerer() });
     const response = await app.request(
-      post('/chat', { query: 'How do I add a site?' }),
+      post('/chat', { query: 'How do I add a site?' }, { Accept: 'text/event-stream' }),
       undefined,
       READER
     );
-    expect(response.status).toBe(503);
+    expect((await events(response)).map((item) => item.event)).toEqual(['meta', 'delta', 'error']);
+    // A stream that fails can still bill tokens it never reports.
+    expect(await callerSpend(deps)).toBe(ANSWER_HOLD_USD);
+  });
+
+  test('finishes the answer, settled, when the turn and the record cannot be saved', async () => {
+    const { app, deps } = setup();
+    deps.conversationStore.append = async () => {
+      throw new Error('table unavailable');
+    };
+    // An error that echoes what it was given, which the logs must not.
+    deps.recordStore.putExchange = async (record) => {
+      throw new Error(`Cannot write "${record.question}": ${record.answer}`);
+    };
+    const response = await app.request(
+      post('/chat', { query: 'How do I add a site?' }, { Accept: 'text/event-stream' }),
+      undefined,
+      READER
+    );
+    const stream = await events(response);
+    expect(stream.map((item) => item.event)).not.toContain('error');
+    expect(stream.at(-1)).toMatchObject({ event: 'done' });
+    // Settled before saving, so the answer's cost is spent rather than the hold.
     const spent = await callerSpend(deps);
     expect(spent).toBeGreaterThan(0);
     expect(spent).toBeLessThan(ANSWER_HOLD_USD);
+    expect(deps.logs).toContainEqual(
+      expect.objectContaining({
+        outcome: 'write-error',
+        write: 'turn',
+        detail: 'table unavailable',
+      })
+    );
+    expect(deps.logs).toContainEqual(
+      expect.objectContaining({
+        outcome: 'write-error',
+        write: 'record',
+        detail: 'Cannot write "[removed]": [removed]',
+      })
+    );
+    expect(JSON.stringify(deps.logs)).not.toContain('add a site');
+    expect(JSON.stringify(deps.logs)).not.toContain('site registry');
   });
 
   test('releases the hold when no answer started', async () => {

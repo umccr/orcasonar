@@ -12,7 +12,7 @@ import {
   SYSTEM_PROMPT,
 } from './prompt';
 import type { Passage, Retriever } from './retrieval';
-import { ANSWER_PASSAGES, toCitation } from './retrieval';
+import { ANSWER_PASSAGES, retrievalQuery, toCitation } from './retrieval';
 import type { ConversationStore, RecordStore } from './stores';
 
 /** Who is asking, from the authorizer: a reader's Cognito `sub` and the app client their token came from. */
@@ -64,10 +64,12 @@ export interface ChatResult {
  * Answer one question, emitting events as they happen. The caller has already reserved allowance for it.
  *
  * Accounting comes first once the answer is written: the cost is priced from the tokens Bedrock reports and replaces
- * the hold before the turn and the exchange are recorded, so a failed write never skips it. When answering fails
- * instead, the hold is settled with what is known to be spent: nothing before retrieval, the retrieval before the model
- * is called, and the whole hold once it is, because a failed call can still bill tokens that it never reports. Logs
- * carry the caller and the outcome, never the question.
+ * the hold before the turn and the exchange are saved. Saving them cannot fail the answer, which the reader already
+ * has: a write that fails is logged as `write-error`, and `done` still follows. When answering fails instead, the hold
+ * is settled with what is known to be spent: nothing before retrieval, the retrieval until the model accepts the
+ * request, and the whole hold once it has, because a failed stream can still bill tokens that it never reports. A
+ * request the model refuses, as for missing access or throttling, bills nothing, so it never costs a reader the hold.
+ * Logs carry the caller and the outcome, never the question.
  */
 export const answerQuestion = async (
   deps: ChatDeps,
@@ -75,7 +77,7 @@ export const answerQuestion = async (
   emit: (event: ChatEvent) => Promise<void>
 ): Promise<ChatResult> => {
   const started = deps.clock().getTime();
-  // What is known to be spent, for settling if answering fails; undefined while the model answers.
+  // What is known to be spent, for settling if answering fails; undefined once the model has accepted the request.
   let spent: number | undefined = 0;
   let settled = false;
   const settle = async (usd: number) => {
@@ -99,7 +101,7 @@ export const answerQuestion = async (
       : [];
     spent = RETRIEVAL_USD;
     const passages: Passage[] = (
-      await deps.retriever.retrieve(request.question, {
+      await deps.retriever.retrieve(retrievalQuery(request.question, history), {
         sites: request.sites,
         topK: ANSWER_PASSAGES,
       })
@@ -115,13 +117,14 @@ export const answerQuestion = async (
       await emit({ event: 'delta', data: { text: answer } });
     } else {
       modelCalled = true;
-      spent = undefined;
       for await (const part of deps.answerer.stream({
         system: SYSTEM_PROMPT,
         messages: buildMessages(request.question, passages, history),
         maxTokens: MAX_ANSWER_TOKENS,
       })) {
-        if (part.type === 'delta') {
+        if (part.type === 'started') {
+          spent = undefined;
+        } else if (part.type === 'delta') {
           answer += part.text;
           await emit({ event: 'delta', data: { text: part.text } });
         } else if (part.type === 'usage') {
@@ -147,27 +150,50 @@ export const answerQuestion = async (
     const citations = cited.map((passage) => toCitation(passage, passages.indexOf(passage) + 1));
     await emit({ event: 'citations', data: citations });
 
-    await deps.conversations.append(request.conversationId, request.caller.id, {
-      question: request.question,
-      answer,
-    });
-    await deps.records.putExchange({
-      exchangeId: request.exchangeId,
-      conversationId: request.conversationId,
-      at: new Date(started).toISOString(),
-      stage: deps.stage,
-      callerId: request.caller.id,
-      clientId: request.caller.clientId,
-      question: request.question,
-      sites: request.sites,
-      answer,
-      sources: cited.map((passage) => ({ id: passage.id, url: passage.url, score: passage.score })),
-      modelId: modelCalled ? deps.answerer.modelId : undefined,
-      usage: modelCalled ? usage : undefined,
-      costUsd,
-      guardrail,
-      latencyMs: deps.clock().getTime() - started,
-    });
+    // Logged rather than thrown: a turn or record that fails to save must not turn a complete answer into an error.
+    const save = async (write: 'turn' | 'record', saving: () => Promise<void>) => {
+      try {
+        await saving();
+      } catch (error) {
+        deps.log({
+          outcome: 'write-error',
+          write,
+          exchangeId: request.exchangeId,
+          ...errorDetail(error, [request.question, answer]),
+        });
+      }
+    };
+    await Promise.all([
+      save('turn', () =>
+        deps.conversations.append(request.conversationId, request.caller.id, {
+          question: request.question,
+          answer,
+        })
+      ),
+      save('record', () =>
+        deps.records.putExchange({
+          exchangeId: request.exchangeId,
+          conversationId: request.conversationId,
+          at: new Date(started).toISOString(),
+          stage: deps.stage,
+          callerId: request.caller.id,
+          clientId: request.caller.clientId,
+          question: request.question,
+          sites: request.sites,
+          answer,
+          sources: cited.map((passage) => ({
+            id: passage.id,
+            url: passage.url,
+            score: passage.score,
+          })),
+          modelId: modelCalled ? deps.answerer.modelId : undefined,
+          usage: modelCalled ? usage : undefined,
+          costUsd,
+          guardrail,
+          latencyMs: deps.clock().getTime() - started,
+        })
+      ),
+    ]);
 
     await emit({ event: 'done', data: { usage } });
     deps.log({
