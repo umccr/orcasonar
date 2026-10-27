@@ -1,0 +1,48 @@
+{
+  "name": "orcasonar-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OrcaSonar's API and functions",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "type-check": "tsc --noEmit",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format:check": "prettier --check .",
+    "format:fix": "prettier --write .",
+    "check": "pnpm type-check && pnpm lint && pnpm format:check",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-agent": "^3.1141.0",
+    "@aws-sdk/client-bedrock-agent-runtime": "^3.1141.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1141.0",
+    "@aws-sdk/client-dynamodb": "^3.1141.0",
+    "@aws-sdk/client-s3": "^3.1141.0",
+    "@aws-sdk/client-ssm": "^3.1141.0",
+    "@aws-sdk/lib-dynamodb": "^3.1141.0",
+    "@hono/aws-lambda": "^1.0.1",
+    "aws-jwt-verify": "^5.2.1",
+    "hono": "^4.12.27",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.5",
+    "@hono/node-server": "^2.0.6",
+    "@types/aws-lambda": "^8.10.163",
+    "@types/node": "^26.5.1",
+    "aws-sdk-client-mock": "^4.1.0",
+    "eslint": "^9.39.5",
+    "globals": "^17.12.0",
+    "prettier": "^3.9.6",
+    "tsx": "^4.20.6",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.70.0",
+    "vitest": "^4.0.0",
+    "yaml": "^2.9.0"
+  }
+}

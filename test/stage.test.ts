@@ -1,0 +1,509 @@
+import { readFileSync } from 'fs';
+import * as path from 'path';
+import { App, Stack } from 'aws-cdk-lib';
+import { Match, Template } from 'aws-cdk-lib/assertions';
+import { parse } from 'yaml';
+import { STAGE_ENVIRONMENTS } from '../infrastructure/environments';
+import {
+  DOCS_ORIGINS,
+  getOrcaSonarStatefulStackProps,
+  getOrcaSonarStatelessStackProps,
+  OrcaSonarStage,
+} from '../infrastructure/stage/config';
+import { APP_ROOT, SSM_PARAMETERS } from '../infrastructure/stage/constants';
+import { OrcaSonarStatefulStack } from '../infrastructure/stage/stateful-stack';
+import { OrcaSonarStatelessStack } from '../infrastructure/stage/stateless-stack';
+import {
+  acknowledgeFindings,
+  addAwsSolutionsChecks,
+  expectNoUnacknowledgedFindings,
+} from './cdk-nag-helpers';
+
+const STAGES: OrcaSonarStage[] = ['BETA', 'PROD'];
+const ENVIRONMENTS = {
+  BETA: STAGE_ENVIRONMENTS.beta,
+  PROD: STAGE_ENVIRONMENTS.prod,
+};
+
+// AwsSolutions findings accepted for OrcaSonar, with the reason each is acceptable.
+const ACCEPTED_RULES = [
+  // Lambda basic execution and the CDK-managed log retention roles.
+  'AwsSolutions-IAM4',
+  // Wildcards scoped to one prefix (docs/*, records/*, feedback/*), the stage's API routes, and the models behind
+  // the inference profiles in the profiles' regions.
+  'AwsSolutions-IAM5',
+  // The buckets hold exported documents and records; S3 server access logs would only log the publish and the API.
+  'AwsSolutions-S1',
+  // API Gateway access and execution logs need the account-level CloudWatch role; enabled per stage once it is
+  // confirmed. The functions log every outcome meanwhile.
+  'AwsSolutions-APIG1',
+  'AwsSolutions-APIG6',
+  // Request validation happens in the functions (zod), with the same error shape as every other error.
+  'AwsSolutions-APIG2',
+  // The API is authorized by the Lambda authorizer (Cognito ID tokens), not by a Cognito user pool authorizer.
+  'AwsSolutions-COG4',
+  // OPTIONS (CORS preflight), /health and the API docs are deliberately open; API Gateway answers them itself, so no
+  // function is reachable without a token.
+  'AwsSolutions-APIG4',
+];
+
+const statefulStack = (stage: OrcaSonarStage) => {
+  const app = new App();
+  const stack = new OrcaSonarStatefulStack(app, `${stage}Stateful`, {
+    env: ENVIRONMENTS[stage],
+    ...getOrcaSonarStatefulStackProps(stage),
+  });
+  return { app, stack };
+};
+
+const statelessStack = (stage: OrcaSonarStage) => {
+  const app = new App();
+  const stack = new OrcaSonarStatelessStack(app, `${stage}Stateless`, {
+    env: ENVIRONMENTS[stage],
+    ...getOrcaSonarStatelessStackProps(stage),
+  });
+  return { app, stack };
+};
+
+/**
+ * Checks must be attached before anything synthesizes the app: a later synth reuses the cached assembly and runs no
+ * validation.
+ */
+const nagFindings = ({ app, stack }: { app: App; stack: Stack }) => {
+  addAwsSolutionsChecks(stack);
+  acknowledgeFindings(stack, ACCEPTED_RULES, 'Accepted for OrcaSonar; see test/stage.test.ts');
+  return () => expectNoUnacknowledgedFindings(app);
+};
+
+describe('cdk-nag', () => {
+  test.each(STAGES)('%s stateful stack reports no unacknowledged findings', (stage) => {
+    expect(nagFindings(statefulStack(stage))).not.toThrow();
+  });
+
+  test.each(STAGES)('%s stateless stack reports no unacknowledged findings', (stage) => {
+    expect(nagFindings(statelessStack(stage))).not.toThrow();
+  });
+});
+
+describe('stateful stack', () => {
+  const template = Template.fromStack(statefulStack('PROD').stack);
+
+  test('creates a managed knowledge base, encrypted with the Sonar key', () => {
+    template.hasResourceProperties('AWS::Bedrock::KnowledgeBase', {
+      KnowledgeBaseConfiguration: {
+        Type: 'MANAGED',
+        ManagedKnowledgeBaseConfiguration: {
+          EmbeddingModelType: 'MANAGED',
+          ServerSideEncryptionConfiguration: { KmsKeyArn: Match.anyValue() },
+        },
+      },
+    });
+  });
+
+  test('indexes the docs/ prefix of the ingest bucket, with the metadata beside each page', () => {
+    template.hasResourceProperties('AWS::Bedrock::DataSource', {
+      Name: 'docs',
+      DataDeletionPolicy: 'DELETE',
+      DataSourceConfiguration: {
+        Type: 'MANAGED_KNOWLEDGE_BASE_CONNECTOR',
+        ManagedKnowledgeBaseConnectorConfiguration: {
+          ConnectorParameters: Match.objectLike({
+            type: 'S3',
+            // Required by the service even for a bucket in the same account.
+            connectionConfiguration: {
+              bucketName: Match.anyValue(),
+              bucketOwnerAccountId: ENVIRONMENTS.PROD.account,
+            },
+            filterConfiguration: { inclusionPrefixes: ['docs/'] },
+            // A prefix would move where the connector looks for `<page>.md.metadata.json`, away from the page.
+            metadataFilesPrefix: Match.absent(),
+          }),
+        },
+      },
+    });
+  });
+
+  test("lets only the docs platform's publisher write docs/, matched by condition", () => {
+    const policy = JSON.stringify(template.findResources('AWS::S3::BucketPolicy'));
+    expect(policy).toContain(':role/docs/docs-publisher');
+    expect(policy).toContain('aws:PrincipalArn');
+    expect(policy).toContain('/docs/*');
+  });
+
+  test('expires records and feedback after 30 days, and keeps eval-set/', () => {
+    template.hasResourceProperties('AWS::S3::Bucket', {
+      LifecycleConfiguration: {
+        Rules: Match.arrayWith([
+          Match.objectLike({ Prefix: 'records/', ExpirationInDays: 30, Status: 'Enabled' }),
+          Match.objectLike({ Prefix: 'feedback/', ExpirationInDays: 30, Status: 'Enabled' }),
+        ]),
+      },
+    });
+    expect(JSON.stringify(template.findResources('AWS::S3::Bucket'))).not.toContain('eval-set/');
+  });
+
+  test('publishes the ingest bucket name for the docs platform', () => {
+    template.hasResourceProperties('AWS::SSM::Parameter', {
+      Name: SSM_PARAMETERS.ingestBucketName,
+    });
+  });
+
+  test('protects the table and keeps data in prod', () => {
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      DeletionProtectionEnabled: true,
+      TimeToLiveSpecification: { AttributeName: 'expiresAt', Enabled: true },
+    });
+    for (const type of [
+      'AWS::S3::Bucket',
+      'AWS::DynamoDB::Table',
+      'AWS::KMS::Key',
+      'AWS::Bedrock::KnowledgeBase',
+      'AWS::Bedrock::DataSource',
+    ]) {
+      template.hasResource(type, {
+        DeletionPolicy: 'RetainExceptOnCreate',
+        UpdateReplacePolicy: 'Retain',
+      });
+    }
+  });
+
+  // A chat function names the version it last read until it reads the new one.
+  test.each(STAGES)('%s keeps a guardrail version it replaces', (stage) => {
+    Template.fromStack(statefulStack(stage).stack).hasResource('AWS::Bedrock::GuardrailVersion', {
+      UpdateReplacePolicy: 'Retain',
+    });
+  });
+
+  // A failed first create must not leave orphans; the fixed table name and key alias would block the retry.
+  test('retains nothing when its first create rolls back', () => {
+    const resources = template.toJSON().Resources as Record<string, { DeletionPolicy?: string }>;
+    const retained = Object.entries(resources)
+      .filter(([, resource]) => resource.DeletionPolicy === 'Retain')
+      .map(([logicalId]) => logicalId);
+    expect(retained).toEqual([]);
+  });
+});
+
+describe('stateless stack', () => {
+  const template = Template.fromStack(statelessStack('PROD').stack);
+
+  type CfnResource = { Type: string; Properties: Record<string, unknown> };
+  type Integration = {
+    Type: string;
+    IntegrationResponses?: { ResponseTemplates?: Record<string, string> }[];
+  };
+  const resources = template.toJSON().Resources as Record<string, CfnResource>;
+  /** A method's path, from its resource up to the API's root, which is not a `Ref`. */
+  const pathOf = (resourceId: unknown): string => {
+    const id = (resourceId as { Ref?: string }).Ref;
+    if (!id) {
+      return '';
+    }
+    const { ParentId, PathPart } = resources[id]!.Properties;
+    return `${pathOf(ParentId)}/${String(PathPart)}`;
+  };
+  const methods = Object.values(resources)
+    .filter((resource) => resource.Type === 'AWS::ApiGateway::Method')
+    .map(({ Properties: method }) => ({
+      route: `${String(method.HttpMethod)} ${pathOf(method.ResourceId)}`,
+      authorization: method.AuthorizationType as string,
+      integration: method.Integration as Integration,
+    }));
+  /** The body API Gateway answers a mock route with, decoded from its response template. */
+  const staticBody = (route: string): string => {
+    const integration = methods.find((method) => method.route === route)?.integration;
+    const responseTemplate =
+      integration?.IntegrationResponses?.[0]?.ResponseTemplates?.['text/html'];
+    const encoded = /^\$util\.base64Decode\("([A-Za-z0-9+/=]+)"\)$/.exec(
+      responseTemplate ?? ''
+    )?.[1];
+    if (!encoded) {
+      throw new Error(`${route} has no static body`);
+    }
+    return Buffer.from(encoded, 'base64').toString('utf8');
+  };
+
+  test('streams /chat through the Lambda authorizer', () => {
+    template.hasResourceProperties('AWS::ApiGateway::Method', {
+      HttpMethod: 'POST',
+      AuthorizationType: 'CUSTOM',
+      Integration: Match.objectLike({ ResponseTransferMode: 'STREAM' }),
+    });
+  });
+
+  test('leaves only /health, the API docs and CORS preflight open', () => {
+    const open = methods
+      .filter((method) => method.authorization === 'NONE')
+      .map((method) => method.route)
+      .filter((route) => !route.startsWith('OPTIONS '));
+    expect(open.sort()).toEqual([
+      'GET /api/v1/health',
+      'GET /schema/openapi.json',
+      'GET /schema/swagger-ui',
+    ]);
+  });
+
+  // Security Hub flags a Lambda that an API Gateway method reaches without authorization.
+  test('reaches a function only through the authorizer; open routes are answered by API Gateway', () => {
+    for (const method of methods) {
+      if (method.authorization === 'NONE') {
+        expect({ route: method.route, type: method.integration.Type }).toEqual({
+          route: method.route,
+          type: 'MOCK',
+        });
+      } else {
+        expect({ route: method.route, authorization: method.authorization }).toEqual({
+          route: method.route,
+          authorization: 'CUSTOM',
+        });
+      }
+    }
+    expect(methods.filter((method) => method.integration.Type === 'AWS_PROXY')).toHaveLength(4);
+  });
+
+  test('answers /health with the stage, without a function', () => {
+    expect(JSON.parse(staticBody('GET /api/v1/health'))).toMatchObject({
+      status: 'ok',
+      stage: 'prod',
+    });
+  });
+
+  test("serves the OpenAPI contract with this stage's API as its server", () => {
+    const document = JSON.parse(staticBody('GET /schema/openapi.json')) as {
+      servers: unknown;
+      paths: Record<string, unknown>;
+    };
+    expect(document.servers).toEqual([{ url: '/api/v1', description: 'This stage' }]);
+    expect(Object.keys(document.paths)).toContain('/chat');
+  });
+
+  test('serves Swagger UI pinned, checked by hash and under a content security policy', () => {
+    const page = staticBody('GET /schema/swagger-ui');
+    expect(page).toContain('http-equiv="Content-Security-Policy"');
+    expect(page).toContain("default-src 'none'");
+    expect(page).toContain("url: '/schema/openapi.json'");
+    expect(page).toMatch(
+      /swagger-ui-dist@\d+\.\d+\.\d+\/swagger-ui-bundle\.js" integrity="sha384-/
+    );
+  });
+
+  test('accepts ID tokens through a token authorizer cached for five minutes', () => {
+    template.hasResourceProperties('AWS::ApiGateway::Authorizer', {
+      Type: 'TOKEN',
+      IdentitySource: 'method.request.header.Authorization',
+      AuthorizerResultTtlInSeconds: 300,
+    });
+  });
+
+  test('allows CORS from the prod docs hosts only', () => {
+    const cors = JSON.stringify(template.findResources('AWS::ApiGateway::Method'));
+    for (const origin of DOCS_ORIGINS.PROD) {
+      expect(cors).toContain(origin);
+    }
+    expect(cors).not.toContain('docs.dev.umccr.org');
+  });
+
+  test('puts WAF in front of the API', () => {
+    template.resourceCountIs('AWS::WAFv2::WebACL', 1);
+    template.resourceCountIs('AWS::WAFv2::WebACLAssociation', 1);
+  });
+
+  test('lets the chat function call only the Australian profiles and their models', () => {
+    const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(policies).toContain('inference-profile/au.anthropic.claude-sonnet-5');
+    expect(policies).toContain('ap-southeast-4::foundation-model/anthropic.claude-sonnet-5');
+    expect(policies).not.toMatch(/foundation-model\/\*"/);
+  });
+
+  test('backs the budget with an AWS Budgets action that denies Bedrock', () => {
+    template.hasResourceProperties('AWS::Budgets::Budget', {
+      Budget: Match.objectLike({ BudgetLimit: { Amount: 50, Unit: 'USD' } }),
+    });
+    template.hasResourceProperties('AWS::Budgets::BudgetsAction', {
+      ActionType: 'APPLY_IAM_POLICY',
+      ApprovalModel: 'AUTOMATIC',
+    });
+  });
+
+  test('creates the budget, and the action role with its policy, before the budget action', () => {
+    const [budgetId] = Object.keys(template.findResources('AWS::Budgets::Budget'));
+    const [action] = Object.values(template.findResources('AWS::Budgets::BudgetsAction')) as {
+      Properties: { BudgetName: unknown };
+      DependsOn?: string[];
+    }[];
+    expect(action!.Properties.BudgetName).toEqual({ Ref: budgetId });
+    const rolePolicies = Object.keys(template.findResources('AWS::IAM::Policy')).filter((id) =>
+      id.startsWith('BudgetActionRoleDefaultPolicy')
+    );
+    expect(rolePolicies).toHaveLength(1);
+    expect(action!.DependsOn).toEqual(expect.arrayContaining(rolePolicies));
+  });
+
+  test('answers API Gateway errors in the API error shape, with CORS headers', () => {
+    const contract = parse(readFileSync(path.join(APP_ROOT, 'schema', 'openapi.yaml'), 'utf8')) as {
+      components: {
+        schemas: { Error: { properties: { error: { properties: { code: { enum: string[] } } } } } };
+      };
+    };
+    const codes = contract.components.schemas.Error.properties.error.properties.code.enum;
+    const responses = Object.values(template.findResources('AWS::ApiGateway::GatewayResponse')).map(
+      ({ Properties: response }) => {
+        const body = String(response.ResponseTemplates['application/json']).replace(
+          '$context.error.messageString',
+          '"Missing Authentication Token"'
+        );
+        return {
+          type: response.ResponseType as string,
+          status: response.StatusCode as string | undefined,
+          error: (JSON.parse(body) as { error: { code: string; message: string } }).error,
+          origin: response.ResponseParameters['gatewayresponse.header.Access-Control-Allow-Origin'],
+        };
+      }
+    );
+    expect(responses.map((response) => response.type).sort()).toEqual([
+      'ACCESS_DENIED',
+      'DEFAULT_4XX',
+      'DEFAULT_5XX',
+      'MISSING_AUTHENTICATION_TOKEN',
+      'THROTTLED',
+      'UNAUTHORIZED',
+      'WAF_FILTERED',
+    ]);
+    for (const response of responses) {
+      expect(codes).toContain(response.error.code);
+      expect(response.error.message).not.toBe('');
+      expect(response.origin).toBe('method.request.header.Origin');
+    }
+    const byType = Object.fromEntries(responses.map((response) => [response.type, response]));
+    expect(byType['UNAUTHORIZED']!.error.code).toBe('unauthorized');
+    expect(byType['WAF_FILTERED']!.error.code).toBe('forbidden');
+    expect(byType['THROTTLED']!.error.code).toBe('throttled');
+    expect(byType['MISSING_AUTHENTICATION_TOKEN']).toMatchObject({
+      status: '404',
+      error: { code: 'not-found' },
+    });
+  });
+
+  test('lets the chat function read the guardrail version as it changes', () => {
+    template.hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          GUARDRAIL_VERSION_PARAMETER: SSM_PARAMETERS.guardrailVersion,
+        }),
+      },
+    });
+    const policies = JSON.stringify(template.findResources('AWS::IAM::Policy'));
+    expect(policies).toContain('ssm:GetParameter');
+    expect(policies).toContain(`:parameter${SSM_PARAMETERS.guardrailVersion}`);
+  });
+
+  test('follows each ingestion job, and raises an alarm when one fails', () => {
+    expect(JSON.stringify(template.findResources('AWS::IAM::Policy'))).toContain(
+      'bedrock:GetIngestionJob'
+    );
+    template.hasResourceProperties('AWS::Logs::MetricFilter', {
+      LogGroupName: { Ref: Match.stringLikeRegexp('^IngestRunFunctionLogGroup') },
+      FilterPattern: '{ $.outcome = "job-failed" }',
+      MetricTransformations: [
+        Match.objectLike({ MetricNamespace: 'OrcaSonar', MetricName: 'IngestionJobsFailed' }),
+      ],
+    });
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Namespace: 'OrcaSonar',
+      MetricName: 'IngestionJobsFailed',
+      Threshold: 1,
+    });
+    // The function's own log group, rather than one that a log retention function would create.
+    template.resourceCountIs('Custom::LogRetention', 0);
+  });
+
+  test('checks for changed documents every 15 minutes', () => {
+    template.hasResourceProperties('AWS::Events::Rule', {
+      ScheduleExpression: 'rate(15 minutes)',
+    });
+  });
+
+  test('tells the alerts topic when any alarm fires and when it clears', () => {
+    const [topic] = Object.keys(template.findResources('AWS::SNS::Topic'));
+    // Kept from when the topic carried only the budget's notices, so that it is never replaced.
+    expect(topic).toMatch(/^BudgetTopic/);
+    const alarms = Object.values(template.findResources('AWS::CloudWatch::Alarm')) as {
+      Properties: { AlarmActions?: unknown; OKActions?: unknown };
+    }[];
+    expect(alarms.length).toBeGreaterThan(0);
+    for (const { Properties: alarm } of alarms) {
+      expect(alarm.AlarmActions).toEqual([{ Ref: topic }]);
+      expect(alarm.OKActions).toEqual([{ Ref: topic }]);
+    }
+    // The topic's own policy replaces SNS's default, so it names every service that publishes.
+    const policy = JSON.stringify(template.findResources('AWS::SNS::TopicPolicy'));
+    expect(policy).toContain('cloudwatch.amazonaws.com');
+    expect(policy).toContain('budgets.amazonaws.com');
+  });
+
+  test('emails the alerts to the addresses configured for the stage', () => {
+    const stack = new OrcaSonarStatelessStack(new App(), 'AlertedStateless', {
+      env: ENVIRONMENTS.PROD,
+      ...getOrcaSonarStatelessStackProps('PROD'),
+      alertEmails: ['platform-alerts@example.org'],
+    });
+    Template.fromStack(stack).hasResourceProperties('AWS::SNS::Subscription', {
+      Protocol: 'email',
+      Endpoint: 'platform-alerts@example.org',
+    });
+  });
+
+  // The functions answer their own errors, a streamed answer's after its 200, so Lambda errors miss them.
+  test('alarms on failed answers and writes, which the chat function logs rather than throws', () => {
+    template.hasResourceProperties('AWS::Logs::MetricFilter', {
+      LogGroupName: { Ref: Match.stringLikeRegexp('^ChatFunctionLogGroup') },
+      FilterPattern:
+        '{ ((($.outcome = "stream-error") || ($.outcome = "answer-error")) && ' +
+        '($.code = "unavailable")) || ($.outcome = "error") }',
+      MetricTransformations: [
+        Match.objectLike({ MetricNamespace: 'OrcaSonar', MetricName: 'AnswersFailed' }),
+      ],
+    });
+    template.hasResourceProperties('AWS::Logs::MetricFilter', {
+      LogGroupName: { Ref: Match.stringLikeRegexp('^ChatFunctionLogGroup') },
+      FilterPattern: '{ ($.outcome = "settle-error") || ($.outcome = "write-error") }',
+      MetricTransformations: [
+        Match.objectLike({ MetricNamespace: 'OrcaSonar', MetricName: 'WritesFailed' }),
+      ],
+    });
+    for (const metric of ['AnswersFailed', 'WritesFailed']) {
+      template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+        Namespace: 'OrcaSonar',
+        MetricName: metric,
+      });
+    }
+    // Searches, documents and feedback answer 5XX when they fail.
+    template.hasResourceProperties('AWS::CloudWatch::Alarm', {
+      Namespace: 'AWS/ApiGateway',
+      MetricName: '5XXError',
+    });
+  });
+
+  // Questions are only ever text for the model, so these rules would block readers and protect nothing.
+  test('only counts the managed body rules that questions about links, HTML or addresses trip', () => {
+    template.hasResourceProperties('AWS::WAFv2::WebACL', {
+      Rules: Match.arrayWith([
+        Match.objectLike({
+          Name: 'AWSManagedRulesCommonRuleSet',
+          Statement: {
+            ManagedRuleGroupStatement: {
+              VendorName: 'AWS',
+              Name: 'AWSManagedRulesCommonRuleSet',
+              RuleActionOverrides: [
+                { Name: 'GenericLFI_BODY', ActionToUse: { Count: {} } },
+                { Name: 'GenericRFI_BODY', ActionToUse: { Count: {} } },
+                { Name: 'CrossSiteScripting_BODY', ActionToUse: { Count: {} } },
+                { Name: 'EC2MetaDataSSRF_BODY', ActionToUse: { Count: {} } },
+              ],
+            },
+          },
+        }),
+      ]),
+    });
+  });
+});
