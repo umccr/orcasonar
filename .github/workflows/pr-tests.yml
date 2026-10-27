@@ -36,7 +36,7 @@ jobs:
           # That hook guards local commits. This workflow also runs on pushes to main, where it would fail.
           SKIP: no-commit-to-branch
       - run: make test
-      - run: make synth
+      - run: make cdk-synth
 
   app:
     name: App tests, lint and type checks

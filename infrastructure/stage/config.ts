@@ -32,10 +32,10 @@ const CALLER_DAILY_USD = 0.4;
 
 /**
  * API Gateway access logs need the account's API Gateway CloudWatch role, which another stack sets: dev has it
- * (2026-10-12). Check prod with `aws apigateway get-account --query cloudwatchRoleArn` before turning them on there;
- * without the role, the deploy fails.
+ * (2026-10-12), and prod (2026-10-21). Without the role, the deploy fails, so check a new account with
+ * `aws apigateway get-account --query cloudwatchRoleArn` before turning them on there.
  */
-const ACCESS_LOGS: Record<OrcaSonarStage, boolean> = { BETA: true, PROD: false };
+const ACCESS_LOGS: Record<OrcaSonarStage, boolean> = { BETA: true, PROD: true };
 
 /**
  * Who hears the alarms and the budget's notices by email: a team address rather than a person's, since this file is

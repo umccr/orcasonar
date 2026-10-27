@@ -2,7 +2,7 @@
 
 PNPM ?= pnpm
 
-.PHONY: install check check-all fix audit-fix test test-all dev synth clean
+.PHONY: install check check-all fix audit-fix test test-all dev cdk-list cdk-synth clean
 
 # The pnpm workspace, app included, and the git hook that runs the pre-commit hooks on each commit, with their
 # environments, so a first commit has nothing to download.
@@ -42,7 +42,11 @@ test-all: test
 dev:
 	@(cd app && $(PNPM) dev)
 
-synth:
+cdk-list:
+	@$(PNPM) cdk-stateful list
+	@$(PNPM) cdk-stateless list
+
+cdk-synth:
 	@$(PNPM) cdk-stateful synth --quiet
 	@$(PNPM) cdk-stateless synth --quiet
 

@@ -177,7 +177,7 @@ caller's and the day's counters being under their limits. The records bucket hol
 | `MODEL_REGIONS`                         | ap-southeast-2, ap-southeast-4                                     | the same                                                                   |
 | `MONTHLY_BUDGET_USD`                    | 10                                                                 | 50                                                                         |
 | `CALLER_DAILY_USD`                      | 0.40                                                               | 0.40                                                                       |
-| `ACCESS_LOGS`                           | on                                                                 | off, until the account's API Gateway CloudWatch role is confirmed          |
+| `ACCESS_LOGS`                           | on                                                                 | on                                                                         |
 | `ALERT_EMAILS`                          | none yet                                                           | none yet                                                                   |
 | Data when a stack is deleted            | deleted                                                            | kept (`RETAIN_ON_UPDATE_OR_DELETE`), and the table has deletion protection |
 | Log retention                           | one month                                                          | three months                                                               |
@@ -207,7 +207,7 @@ GitHub Actions checks pull requests, and the pipelines in the toolchain account 
 
 | Job                                  | Runs                                                                                 |
 | ------------------------------------ | ------------------------------------------------------------------------------------ |
-| Infrastructure tests, lint and synth | `make check`, with `no-commit-to-branch` skipped; `make test`; `make synth`          |
+| Infrastructure tests, lint and synth | `make check`, with `no-commit-to-branch` skipped; `make test`; `make cdk-synth`      |
 | App tests, lint and type checks      | `cd app && pnpm check && pnpm test`                                                  |
 | Secrets scan                         | detect-secrets over every tracked file but the lockfile, against `.secrets.baseline` |
 
@@ -240,7 +240,8 @@ Source (umccr/orcasonar main) ─▶ tests, in parallel ─▶ synth ─▶ self
 | `make check-all`  | `make check`, and the app's type check, lint and format check                                                       |
 | `make test`       | the infrastructure tests: `tsc --noEmit`, then Jest with cdk-nag                                                    |
 | `make test-all`   | `make test`, and the app's Vitest tests                                                                             |
-| `make synth`      | synthesizes both toolchain stacks, and with them every stage stack                                                  |
+| `make cdk-list`   | lists both toolchain stacks and, by construct path, the stage stacks each deploys                                   |
+| `make cdk-synth`  | synthesizes both toolchain stacks, and with them every stage stack                                                  |
 | `make dev`        | the API on `http://127.0.0.1:8787/api/v1`, in memory, with no AWS access                                            |
 | `make fix`        | Prettier and ESLint fixes, in both packages                                                                         |
 | `make audit-fix`  | `pnpm audit --fix`: overrides that force patched versions                                                           |
@@ -334,4 +335,4 @@ Each of these has a reason. Check it before changing one.
 | Replaced guardrail versions are kept.                                                                                                         | Running functions use the old version until they read the new one, and the stateless stack names it as their fallback until its next deploy.                                            |
 | Spend is read with three consistent `GetItem` calls, not one batch.                                                                           | A throttled batch can come back without some counters, which would read as nothing spent.                                                                                               |
 | `/documents/{id}` does not decode its ID.                                                                                                     | Hono has decoded it already; decoding it again would change or refuse IDs that contain `%`.                                                                                             |
-| The budget backstop filters on the service `Amazon Bedrock`; `ACCESS_LOGS` is off in prod; `ALERT_EMAILS` is empty; `MIN_SCORE` is 0.         | Open items waiting on a check or a decision, not oversights: [project.md](project.md#open-items).                                                                                       |
+| The budget backstop filters on the service `Amazon Bedrock`; `ALERT_EMAILS` is empty; `MIN_SCORE` is 0.                                       | Open items waiting on a check or a decision, not oversights: [project.md](project.md#open-items).                                                                                       |

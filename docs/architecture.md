@@ -119,9 +119,9 @@ without authorization, and a stack test keeps every Lambda integration behind th
   stops an answer the passages do not support.
 - The knowledge base and the guardrail create with the Sonar key, and the first ingestion jobs indexed `/platform/`'s
   documents from the KMS-encrypted bucket (dev, 2026-10-13).
-- API Gateway access and execution logs need the account-level CloudWatch role. dev has one, set by another stack
-  (2026-10-12), and writes access logs; `ACCESS_LOGS` in `infrastructure/stage/config.ts` keeps them off in prod
-  until `aws apigateway get-account` shows the role there.
+- API Gateway access and execution logs need the account-level CloudWatch role. dev and prod each have one, set by
+  another stack (dev 2026-10-12, prod 2026-10-21), and both stages write access logs (`ACCESS_LOGS` in
+  `infrastructure/stage/config.ts`); execution logs stay off.
 - The budget backstop filters on the service `Amazon Bedrock`, but Anthropic's models are billed through AWS
   Marketplace under their own names, so the budget may never see Claude's cost. Check where the first answers' cost
   appears in Cost Explorer and filter on that; AWS Budgets can also filter on Bedrock's model and provider since

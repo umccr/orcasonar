@@ -81,7 +81,8 @@ make install          # the whole pnpm workspace, app included, and the git hook
 make check            # dependency audit, formatting, lint and the pre-commit hooks
 make check-all        # the same, plus the app's lint, formatting and type checks
 make test-all         # jest with cdk-nag for the infrastructure, vitest for the app
-make synth            # both toolchain stacks
+make cdk-list         # the toolchain stacks and the stage stacks they deploy
+make cdk-synth        # both toolchain stacks
 make dev              # the API locally, with in-memory stores, on http://127.0.0.1:8787/api/v1
 make fix              # formatting and lint fixes, infrastructure and app
 make audit-fix        # overrides forcing patched dependency versions

@@ -36,19 +36,18 @@ first action of its prod stage, for approval. Changes start one pipeline or both
 | anything else, such as `infrastructure/stage/config.ts`, `constants.ts`, `package.json` or the lockfile | both                   |
 | `docs/`, or Markdown anywhere                                                                           | neither                |
 
-## State on 2026-10-15
+## State on 2026-10-21
 
-A read-only check of the toolchain and dev accounts, which changed nothing, found:
+A read-only check of the toolchain, dev and prod accounts, which changed nothing, found:
 
-|                 | Toolchain account                                                                                                                                                                                  | dev account                                                                                                                                                                                                                                                                                                                                                                                  |
-| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Prerequisites   | all present: `codestar_github_arn` (connection `AVAILABLE`), `/chatbot_arn/slack/alerts-build`, CDK bootstrap version 32                                                                           | all present: `/umccr/certificate_arn` (regional, covering `*.dev.umccr.org`), `/hosted_zone/umccr/*`, `/data_portal/client/cog_user_pool_id`, `/cognito/docs-app/app-client-id`; CDK bootstrap version 32, trusting the toolchain account                                                                                                                                                    |
-| Models          |                                                                                                                                                                                                    | `au.anthropic.claude-sonnet-5` and `au.anthropic.claude-haiku-4-5-20251001-v1:0` active, routing to ap-southeast-2 and ap-southeast-4. Anthropic's use-case form submitted and both models' agreements accepted on 2026-10-15 ([model access](#model-access)); the organisation's region policy allows ap-southeast-4 since the same day ([region policy](#the-organisations-region-policy)) |
-| OrcaSonar       | the toolchain stacks are deployed (2026-10-13): pipelines `UMCCR-OrcaSonarStateful` and `UMCCR-OrcaSonarStateless` exist, and fail at Source because `umccr/orcasonar` on GitHub has no `main` yet | both stage stacks deployed by hand from the branch (step 3), the stateless one last on 2026-10-15; `cdk diff --method template` is clean for both. The knowledge base holds `/platform/`'s documents, `/health` and the API docs answer, and the chat answers questions                                                                                                                      |
-| Still to decide |                                                                                                                                                                                                    | Bedrock's data-retention mode was `inherit`, not `none`, on 2026-10-12 (step 1); API Gateway's account-level CloudWatch role is set, by another stack, so `accessLogs` can be turned on for beta                                                                                                                                                                                             |
+|                 | Toolchain account                                                                                                                                                                                                                                                                                                                                                                                        | dev account                                                                                                                                                                                                                                                                                                                                                                                                     | prod account                                                                                                                                                                                                                                       |
+| --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Prerequisites   | all present: `codestar_github_arn` (connection `AVAILABLE`), `/chatbot_arn/slack/alerts-build`, CDK bootstrap version 32                                                                                                                                                                                                                                                                                 | all present: `/umccr/certificate_arn` (regional, covering `*.dev.umccr.org`), `/hosted_zone/umccr/*`, `/data_portal/client/cog_user_pool_id`, `/cognito/docs-app/app-client-id`; CDK bootstrap version 32, trusting the toolchain account; API Gateway's CloudWatch role                                                                                                                                        | all present, as in dev, with the certificate covering `*.prod.umccr.org`; none of OrcaSonar's names is taken                                                                                                                                       |
+| Models          |                                                                                                                                                                                                                                                                                                                                                                                                          | `au.anthropic.claude-sonnet-5` and `au.anthropic.claude-haiku-4-5-20251001-v1:0` active, routing to ap-southeast-2 and ap-southeast-4. Anthropic's use-case form submitted and both models' agreements accepted on 2026-10-15 ([model access](#model-access)); the organisation's region policy allows ap-southeast-4 since the same day ([region policy](#the-organisations-region-policy))                    | both profiles active, but **neither model's agreement accepted** (`agreementAvailability` `NOT_AVAILABLE`): until an administrator accepts them ([model access](#model-access)), every answer fails                                                |
+| OrcaSonar       | the toolchain stacks are deployed (2026-10-13), and `cdk diff --method template` against the branch is clean for both, so the first run's self-update changes nothing. `main` on GitHub holds only an empty initial commit, so both pipelines fail at Build, which has no code to test. Merging the branch starts both; its head passes the same build steps (Node.js 24, `--ignore-scripts`, no `.git`) | both stage stacks deployed by hand from the branch (step 3), last on 2026-10-16. Against the branch head, `cdk diff --method template` changes only the stateful stack's commit output, and adds the stateless stack's alarms, access logs and WAF count overrides, replacing nothing but the API deployment. The knowledge base holds both sites' documents, from the docs site pipeline, and the chat answers | nothing deployed. The docs platform's `docs-publisher` role there already has its grants on the ingest bucket, but every prod release so far skipped the export, since `/orcasonar/ingest-bucket-name` does not exist yet ([step 7](#step-7-prod)) |
+| Still to decide |                                                                                                                                                                                                                                                                                                                                                                                                          | Bedrock's data-retention mode was `inherit`, not `none`, on 2026-10-12 (step 1)                                                                                                                                                                                                                                                                                                                                 | who hears the [alerts](#alerts)                                                                                                                                                                                                                    |
 
-stg runs no OrcaSonar stage. A read-only check on 2026-10-21 found no OrcaSonar resources in stg or prod, and in
-prod the Claude Sonnet 5 agreement not yet accepted (`agreementAvailability` `NOT_AVAILABLE`; [model access](#model-access)).
+stg runs no OrcaSonar stage, and held no OrcaSonar resources on 2026-10-21.
 
 ## Before you start
 
@@ -86,7 +85,8 @@ aws sts get-caller-identity --query Account --output text                   # ch
 4. Push main, then deploy the stateful pipeline; wait until it has deployed beta
 5. Deploy the stateless pipeline
 6. Connect docs.umccr.org: documents, then the chat
-7. prod: steps 1 and 2 there, then PromoteToProd on the stateful pipeline, then on the stateless one
+7. prod: steps 1 and 2 there, then PromoteToProd on the stateful pipeline, then on the stateless one; then release
+   each docs site once more, so prod's index gets its documents
 ```
 
 ---
@@ -301,7 +301,8 @@ aws apigateway get-account --query cloudwatchRoleArn --output text   # None: not
 ```
 
 If it is set, the stage's entry in `ACCESS_LOGS` (`infrastructure/stage/config.ts`) can turn the access logs on;
-without the role, the stage's deploy fails. dev's are on; prod's wait for this check.
+without the role, the stage's deploy fails. Both stages have the role and their access logs on (checked
+2026-10-21).
 
 ### Alerts
 
@@ -401,9 +402,10 @@ Then run the checks in steps 4 and 5, and step 6 if docs.umccr.org's dev stage i
 
 ## Step 4: The stateful pipeline
 
-**Both pipelines' stacks are deployed already (2026-10-13; see [State](#state-on-2026-10-15)).** They fail at
-Source until `main` exists on GitHub, and pushing `main` starts both, so the `cdk deploy` commands in this step and
-the next are needed again only for a new toolchain account or after a teardown. The checks below still apply.
+**Both pipelines' stacks are deployed already (2026-10-13; see [State](#state-on-2026-10-21)).** They fail at
+Build until the code is on `main`, whose only commit on GitHub is empty, and merging it starts both, so the
+`cdk deploy` commands in this step and the next are needed again only for a new toolchain account or after a
+teardown. The checks below still apply.
 
 The pipelines build `umccr/orcasonar` `main`. Before deploying them:
 
@@ -494,9 +496,11 @@ names it in `/_auth/env.js`, and its publish steps already look for `/orcasonar/
 ### Documents
 
 Each docs site's next release, after the stateful stack is in the stage, uploads its pages under `docs/<slug>/` in
-the ingest bucket. Every 15 minutes, if anything changed, one ingestion job indexes them. To fill the index straight
-away, release each site once (docs-platform guide, step 6). Until dispatched publishing runs, publish each site by
-hand with its documents, from committed content only: the docs-platform guide's **Publishing by hand** shows how.
+the ingest bucket. A release before that publishes the pages only, and its log warns that
+`/orcasonar/ingest-bucket-name` does not exist. Every 15 minutes, if anything changed, one ingestion job indexes the
+documents. To fill the index straight away, release each site once more: push a change under the site's docs paths,
+or start a release by hand
+([docs-platform runbook](https://github.com/umccr/docs-platform/blob/main/docs/operating/runbooks.md#start-a-release-by-hand)).
 Then, with dev credentials:
 
 ```sh
@@ -540,7 +544,8 @@ The stream is `meta`, then `delta` events, then `citations` and `done`, as [api.
 ## Step 7: prod
 
 1. **Prerequisites**: steps 1 and 2 in the prod account, including the docs platform's Cognito client in its
-   `cognito_aai` workspace.
+   `cognito_aai` workspace. On 2026-10-21 all were in place but two: the Claude model agreements
+   ([model access](#model-access)), without which every answer fails, and someone to hear the [alerts](#alerts).
 2. **Prod**: approve **PromoteToProd** on `UMCCR-OrcaSonarStateful` first, the first action of its prod stage, in the
    toolchain account's CodePipeline console, within 60 minutes of the run reaching it. Otherwise start the pipeline
    again, with toolchain credentials:
@@ -551,7 +556,10 @@ The stream is `meta`, then `delta` events, then `citations` and `done`, as [api.
 
    Once its prod stage is done, approve the stateless pipeline's the same way (`UMCCR-OrcaSonarStateless`).
 
-3. **Check** prod as in steps 4 to 6, with `https://sonar.prod.umccr.org/api/v1` and the prod docs hosts.
+3. **Documents**: release each docs site once more, as in [step 6](#documents), once the stateful stack is in prod.
+   Every earlier prod release skipped the export, so the index starts empty, and until its first ingestion job
+   completes, the chat says the documentation does not cover the question.
+4. **Check** prod as in steps 4 to 6, with `https://sonar.prod.umccr.org/api/v1` and the prod docs hosts.
 
 In prod, the stateful stack's KMS key, buckets and table are retained if the stack is deleted, and the table has
 deletion protection.
