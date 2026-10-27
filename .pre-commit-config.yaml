@@ -5,6 +5,8 @@ repos:
       - id: check-added-large-files
         exclude: ^(pnpm-lock.yaml)
       - id: check-yaml
+        # pnpm writes pnpm-lock.yaml as two YAML documents (env lockfile + main lockfile)
+        exclude: ^pnpm-lock\.yaml$
       - id: detect-aws-credentials
         args: [--allow-missing-credentials]
       - id: detect-private-key

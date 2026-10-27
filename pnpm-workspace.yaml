@@ -13,3 +13,6 @@ allowBuilds:
 auditConfig:
   ignoreGhsas:
     - GHSA-hp3w-g68c-fv3c
+overrides:
+  '@vitest/mocker@>=2.1.0-beta.7 <4.1.12': '>=4.1.12'
+  '@vitest/mocker@>=4.1.11 <4.1.12': '>=4.1.12'
