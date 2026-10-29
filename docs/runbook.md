@@ -133,12 +133,15 @@ set into `eval-set/` without the `callerId` field.
 ## Read the audit log
 
 The audit API lists who asked what, the answers, and usage per reader, for the last 30 days ([api.md](api.md#the-audit-log)).
-Only members of the `admin` group in the `data-portal-<stage>` user pool may read it. To let someone read it, add them
-to that group; their next ID token carries it, within the hour. To use a different group, change `AUDIT_GROUP` in
-`infrastructure/stage/config.ts`.
+Who may read it is `AUDIT_GROUP` in `infrastructure/stage/config.ts`. In prod, only members of the `admin` group in
+the `data-portal-prod` user pool may: to let someone read it, add them to that group, and their next ID token carries
+it, within the hour. In beta it is `*` for now, so any token the API accepts reads it, as for chat and search. Set
+beta back to `admin` before readers outside the platform team use it there.
 
-Call it with an ID token issued to the `docs-app` client, such as the one the docs chat panel holds after sign-in,
-either in Swagger UI at `/schema/swagger-ui/` (**Authorize**) or with curl:
+Call it with an ID token issued to the `docs-app` client, as every route needs: a token from the portal or another
+client gets `401`. Sign in on the stage's docs site and open the chat panel once, then copy the panel's current token
+in the browser console with `copy(await umccrDocsAuth.getIdToken())`. It lasts an hour. Use it in Swagger UI at
+`/schema/swagger-ui/` (**Authorize**, the token alone, without `Bearer`) or with curl:
 
 ```sh
 curl -H "Authorization: Bearer $TOKEN" 'https://sonar.prod.umccr.org/api/v1/audit/usage'

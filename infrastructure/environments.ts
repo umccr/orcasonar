@@ -1,20 +1,14 @@
 import type { Environment } from 'aws-cdk-lib';
-// The package's environments only: its pipeline construct is replaced by ./toolchain/deployment-pipeline.ts.
-import {
-  BETA_ENVIRONMENT,
-  PROD_ENVIRONMENT,
-  TOOLCHAIN_ENVIRONMENT,
-} from '@orcabus/platform-cdk-constructs/deployment-stack-pipeline/config';
+import { ACCOUNTS } from './shared/platform';
 import type { DeploymentStage } from './toolchain/deployment-pipeline';
 
 /**
  * Account and region of each stage: beta in the dev account and prod in prod; the stg account runs no OrcaSonar
- * stage. The pipelines run in the toolchain account. Account IDs come from `@orcabus/platform-cdk-constructs`,
- * UMCCR's shared account list.
+ * stage. The pipelines run in the toolchain account. Account IDs are UMCCR's, in `./shared/platform.ts`.
  */
 export const STAGE_ENVIRONMENTS: Record<DeploymentStage, Environment> = {
-  beta: BETA_ENVIRONMENT,
-  prod: PROD_ENVIRONMENT,
+  beta: ACCOUNTS.dev,
+  prod: ACCOUNTS.prod,
 };
 
-export { TOOLCHAIN_ENVIRONMENT };
+export const TOOLCHAIN_ENVIRONMENT: Environment = ACCOUNTS.toolchain;

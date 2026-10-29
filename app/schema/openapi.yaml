@@ -97,8 +97,9 @@ paths:
     get:
       summary: The audit log, newest first (administrators only)
       description: |
-        Who asked what, and how it was answered: answered, not-covered and failed exchanges, kept 30 days. Only
-        members of the audit group (`admin` in the data-portal user pool) may read it; anyone else gets `403`. To read
+        Who asked what, and how it was answered: answered, not-covered and failed exchanges, kept 30 days. In prod,
+        only members of the audit group (`admin` in the data-portal user pool) may read it, and anyone else gets
+        `403`; in beta, for now, any accepted token may. To read
         the next page, pass `nextCursor` as `cursor` with the same filters: the cursor keeps the window, so `from` and
         `to` are not needed again.
       parameters:

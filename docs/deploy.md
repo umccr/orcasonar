@@ -284,12 +284,13 @@ aws bedrock get-account-data-retention   # mode: none is the design; inherit is 
 
 ### Parameters from other repositories
 
-| Parameter                                          | Written by                                       | Used for                                                                                |
-| -------------------------------------------------- | ------------------------------------------------ | --------------------------------------------------------------------------------------- |
-| `/umccr/certificate_arn`                           | the account's shared setup                       | the API's custom domain: a certificate in ap-southeast-2 covering `sonar.<stage zone>`  |
-| `/hosted_zone/umccr/id`, `/hosted_zone/umccr/name` | the account's shared setup                       | the `sonar` DNS record                                                                  |
-| `/data_portal/client/cog_user_pool_id`             | `umccr/infrastructure` `cognito_aai`             | the authorizer's user pool                                                              |
-| `/cognito/docs-app/app-client-id`                  | `umccr/infrastructure` `cognito_aai/app_docs.tf` | the authorizer's allowed client: apply it as the docs-platform guide's step 1 describes |
+| Parameter                                          | Written by                                         | Used for                                                                                |
+| -------------------------------------------------- | -------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| `/umccr/certificate_arn`                           | the account's shared setup                         | the API's custom domain: a certificate in ap-southeast-2 covering `sonar.<stage zone>`  |
+| `/hosted_zone/umccr/id`, `/hosted_zone/umccr/name` | the account's shared setup                         | the `sonar` DNS record                                                                  |
+| `/data_portal/client/cog_user_pool_id`             | `umccr/infrastructure` `cognito_aai`               | the authorizer's user pool                                                              |
+| `/cognito/docs-app/app-client-id`                  | `umccr/infrastructure` `cognito_aai/app_docs.tf`   | the authorizer's allowed client: apply it as the docs-platform guide's step 1 describes |
+| `/orcaui/cog_app_client_id_stage`                  | `umccr/infrastructure` `cognito_aai/app_orcaui.tf` | the authorizer's allowed client for OrcaUI; already there wherever OrcaUI runs          |
 
 ### API Gateway logging (optional)
 
@@ -349,7 +350,7 @@ aws sso login --profile dev && export AWS_PROFILE=dev AWS_REGION=ap-southeast-2
 # a) The parameters the stateless stack reads: InvalidParameters must be empty
 aws ssm get-parameters --query InvalidParameters --names \
   /umccr/certificate_arn /hosted_zone/umccr/id /hosted_zone/umccr/name \
-  /data_portal/client/cog_user_pool_id /cognito/docs-app/app-client-id
+  /data_portal/client/cog_user_pool_id /cognito/docs-app/app-client-id /orcaui/cog_app_client_id_stage
 
 # b) The certificate is regional, issued, and covers sonar.<stage zone>
 CERT=$(aws ssm get-parameter --name /umccr/certificate_arn --query Parameter.Value --output text)

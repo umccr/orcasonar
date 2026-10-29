@@ -26,7 +26,7 @@ import { Key } from 'aws-cdk-lib/aws-kms';
 import { BlockPublicAccess, Bucket, BucketEncryption } from 'aws-cdk-lib/aws-s3';
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
-import { addGitCommitIdOutput } from '@orcabus/platform-cdk-constructs/utils';
+import { addGitCommitIdOutput } from '../shared/git-commit';
 import {
   AUDIT_INDEX,
   DOCS_PREFIX,
