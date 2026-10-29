@@ -668,6 +668,16 @@ describe('audit log, read', () => {
     }
   );
 
+  test.each(['/audit/exchanges', `/audit/conversations/${conversation}`, '/audit/usage'])(
+    '%s is open to every signed-in caller where the group is *',
+    async (path) => {
+      const { deps } = seeded();
+      const open = createApp({ ...deps, auditGroup: '*' });
+      expect((await open.request(get(path), undefined, READER)).status).toBe(200);
+      expect((await open.request(get(path), undefined, {})).status).toBe(401);
+    }
+  );
+
   test('lists the last week newest first, with the question and the start of the answer', async () => {
     const { app, deps } = seeded();
     const response = await app.request(get('/audit/exchanges'), undefined, ADMIN);

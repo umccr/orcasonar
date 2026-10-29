@@ -22,7 +22,10 @@ export interface AppDeps extends Omit<ChatDeps, 'budget' | 'answerer'> {
   readonly documents: DocumentStore;
   /** Only the chat function has a model; the query function never builds one. */
   readonly answerer: () => ChatDeps['answerer'];
-  /** The Cognito group whose members may read the audit log; without one, no one may. */
+  /**
+   * Who may read the audit log: the Cognito group whose members may, or `*` for every signed-in caller. Without one,
+   * no one may.
+   */
   readonly auditGroup?: string;
   /** Local development only: a caller to assume when no authorizer ran. */
   readonly devCaller?: Caller;
@@ -226,12 +229,14 @@ export const createApp = (deps: AppDeps) => {
   };
 
   /**
-   * The audit log holds everyone's questions with their emails, so only members of the audit group may read it. Each
-   * read is logged with who read it, and never with what it returned.
+   * The audit log holds everyone's questions with their emails, so only members of the audit group may read it, or,
+   * where the group is `*`, every signed-in caller. Each read is logged with who read it, and never with what it
+   * returned.
    */
   const auditorFrom = (c: Context<Env>): Caller => {
     const caller = callerFrom(c, deps.devCaller);
-    if (!deps.auditGroup || !caller.groups?.includes(deps.auditGroup)) {
+    const group = deps.auditGroup;
+    if (group !== '*' && (!group || !caller.groups?.includes(group))) {
       throw new ApiError(403, 'forbidden', 'Only OrcaSonar administrators can read the audit log.');
     }
     return caller;

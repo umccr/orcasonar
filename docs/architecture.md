@@ -1,7 +1,7 @@
 # Architecture
 
-OrcaSonar answers questions about UMCCR documentation. Release 1 has one caller, the chat panel on docs.umccr.org,
-and one source, the pages docs.umccr.org publishes. Both are designed to grow: more callers join the authorizer's
+OrcaSonar answers questions about UMCCR documentation. It has two callers, the chat panel on docs.umccr.org and
+OrcaUI, and one source, the pages docs.umccr.org publishes. Both are designed to grow: more callers join the authorizer's
 client list, and more sources become more knowledge base data sources.
 
 ## Components

@@ -1,12 +1,12 @@
 import { RemovalPolicy } from 'aws-cdk-lib';
 import { RetentionDays } from 'aws-cdk-lib/aws-logs';
-import { StageName } from '@orcabus/platform-cdk-constructs/shared-config/accounts';
+import { ORCAUI_CLIENT_ID_PARAMETER, ORCAUI_ORIGINS } from '../shared/platform';
 import { DOCS_APP_CLIENT_ID_PARAMETER } from './constants';
 import { OrcaSonarStatefulStackProps } from './stateful-stack';
 import { OrcaSonarStatelessStackProps } from './stateless-stack';
 
 /** The stages OrcaSonar runs in: dev (beta) and prod. The stg account has none. */
-export type OrcaSonarStage = Exclude<StageName, 'GAMMA'>;
+export type OrcaSonarStage = 'BETA' | 'PROD';
 
 const STAGE_SLUG: Record<OrcaSonarStage, string> = { BETA: 'beta', PROD: 'prod' };
 
@@ -15,6 +15,16 @@ export const DOCS_ORIGINS: Record<OrcaSonarStage, string[]> = {
   BETA: ['https://docs.dev.umccr.org'],
   PROD: ['https://docs.umccr.org', 'https://docs.prod.umccr.org'],
 };
+
+/**
+ * The Cognito app clients whose ID tokens the authorizer accepts, by the SSM parameters that hold their IDs: the docs
+ * chat panel and OrcaUI. Each caller is added by name rather than taking OrcaBus's whole list, which also holds the
+ * token service's client for machines and, in beta, a local client. Machine callers wait for caps of their own.
+ */
+export const ALLOWED_CLIENT_ID_PARAMETERS = [
+  DOCS_APP_CLIENT_ID_PARAMETER,
+  ORCAUI_CLIENT_ID_PARAMETER,
+];
 
 /**
  * Claude through the Australian cross-Region inference profiles, which run in Sydney and Melbourne only. Confirm the
@@ -45,10 +55,12 @@ const ACCESS_LOGS: Record<OrcaSonarStage, boolean> = { BETA: true, PROD: true };
 const ALERT_EMAILS: Record<OrcaSonarStage, string[]> = { BETA: [], PROD: [] };
 
 /**
- * The data-portal Cognito group whose members may read the audit log: everyone's questions, with their emails. The
- * portal's administrators for now; a group of OrcaSonar's own can replace it here, with no change to the code.
+ * Who may read the audit log, everyone's questions with their emails: the data-portal Cognito group whose members may,
+ * or `*` for every reader with a token the authorizer accepts. Beta is open for now, while the audit log is tried out
+ * with the same tokens as chat and search; prod is for the portal's administrators. A group of OrcaSonar's own can
+ * replace `admin` here, with no change to the code.
  */
-const AUDIT_GROUP = 'admin';
+const AUDIT_GROUP: Record<OrcaSonarStage, string> = { BETA: '*', PROD: 'admin' };
 
 export const getOrcaSonarStatefulStackProps = (
   stage: OrcaSonarStage
@@ -67,9 +79,8 @@ export const getOrcaSonarStatelessStackProps = (
   stage: OrcaSonarStage
 ): OrcaSonarStatelessStackProps => ({
   stageSlug: STAGE_SLUG[stage],
-  corsAllowOrigins: DOCS_ORIGINS[stage],
-  // Release 1: the docs chat panel only. Portal apps and a machine client join this list when they start calling.
-  allowedClientIdParameters: [DOCS_APP_CLIENT_ID_PARAMETER],
+  corsAllowOrigins: [...DOCS_ORIGINS[stage], ...ORCAUI_ORIGINS[stage]],
+  allowedClientIdParameters: ALLOWED_CLIENT_ID_PARAMETERS,
   answerModelId: ANSWER_MODEL_ID,
   allowedModelIds: ALLOWED_MODEL_IDS,
   modelRegions: MODEL_REGIONS,
@@ -77,5 +88,5 @@ export const getOrcaSonarStatelessStackProps = (
   accessLogs: ACCESS_LOGS[stage],
   logRetention: stage === 'PROD' ? RetentionDays.THREE_MONTHS : RetentionDays.ONE_MONTH,
   alertEmails: ALERT_EMAILS[stage],
-  auditGroup: AUDIT_GROUP,
+  auditGroup: AUDIT_GROUP[stage],
 });

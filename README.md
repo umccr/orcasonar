@@ -10,7 +10,7 @@ The first release answers questions about UMCCR documentation for the chat panel
 ## How it fits together
 
 ```text
-docs.umccr.org chat panel ──HTTPS──▶ AWS WAF ─▶ API Gateway REST API ─▶ Lambda authorizer (Cognito ID token)
+docs.umccr.org chat panel, OrcaUI ──HTTPS──▶ AWS WAF ─▶ API Gateway REST API ─▶ Lambda authorizer (Cognito ID token)
                                                   │
                                                   ├─ POST /chat (streamed) ─▶ chat Lambda ─▶ budget (DynamoDB)
                                                   │                                       ─▶ managed knowledge base: Retrieve
@@ -48,7 +48,7 @@ for what is deployed, [docs/api.md](docs/api.md) for the API, [docs/deploy.md](d
 | `GET /schema/openapi.json`   | The OpenAPI contract as JSON. No token.                                                                                         |
 
 Every endpoint under `/api/v1` but `/health` needs a Cognito ID token from an allowed app client in
-`Authorization: Bearer`. Release 1 allows the docs platform's `docs-app` client only. The open routes are answered by
+`Authorization: Bearer`. It accepts the docs platform's `docs-app` client and OrcaUI's app client. The open routes are answered by
 API Gateway itself, so no Lambda runs without a token. The contract is
 [app/schema/openapi.yaml](app/schema/openapi.yaml), browsable at
 [sonar.dev.umccr.org/schema/swagger-ui/](https://sonar.dev.umccr.org/schema/swagger-ui/) and the same path on each

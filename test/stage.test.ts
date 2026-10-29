@@ -288,7 +288,9 @@ describe('stateless stack', () => {
     );
     expect(auditing).toHaveLength(1);
     const [auditId, audit] = auditing[0]!;
+    // Prod's audit log is for the portal's administrators; beta's is open to every reader for now.
     expect(audit.Properties.Environment).toMatchObject({ Variables: { AUDIT_GROUP: 'admin' } });
+    expect(getOrcaSonarStatelessStackProps('BETA').auditGroup).toBe('*');
 
     const routes = methods.filter((method) => method.route.startsWith('GET /api/v1/audit/'));
     expect(routes.map((method) => method.route).sort()).toEqual([
@@ -345,12 +347,36 @@ describe('stateless stack', () => {
     });
   });
 
-  test('allows CORS from the prod docs hosts only', () => {
+  test("allows CORS from prod's docs and OrcaUI hosts only", () => {
     const cors = JSON.stringify(template.findResources('AWS::ApiGateway::Method'));
-    for (const origin of DOCS_ORIGINS.PROD) {
+    for (const origin of [
+      ...DOCS_ORIGINS.PROD,
+      'https://orcaui.umccr.org',
+      'https://portal.umccr.org',
+    ]) {
       expect(cors).toContain(origin);
     }
     expect(cors).not.toContain('docs.dev.umccr.org');
+    expect(cors).not.toContain('portal.dev.umccr.org');
+  });
+
+  test.each(STAGES)(
+    "%s accepts ID tokens from the docs panel's and OrcaUI's clients, and no other",
+    (stage) => {
+      const props = getOrcaSonarStatelessStackProps(stage);
+      expect(props.allowedClientIdParameters).toEqual([
+        '/cognito/docs-app/app-client-id',
+        '/orcaui/cog_app_client_id_stage',
+      ]);
+      expect(props.corsAllowOrigins.every((origin) => origin.startsWith('https://'))).toBe(true);
+    }
+  );
+
+  test("passes both clients' IDs to the authorizer, read from SSM at deploy", () => {
+    const parameters = JSON.stringify(template.toJSON().Parameters);
+    expect(parameters).toContain('/cognito/docs-app/app-client-id');
+    expect(parameters).toContain('/orcaui/cog_app_client_id_stage');
+    expect(parameters).not.toContain('/data_portal/client/data2/cog_app_client_id_stage');
   });
 
   test('puts WAF in front of the API', () => {

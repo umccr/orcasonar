@@ -20,10 +20,12 @@ hashes, under a Content-Security-Policy that allows nothing else (`infrastructur
 ## Authentication
 
 Send a Cognito ID token from the `data-portal-<stage>` pool, issued to an allowed app client, as
-`Authorization: Bearer <token>`. Release 1 allows the docs platform's `docs-app` client only. `/health` and the
+`Authorization: Bearer <token>`. Two clients are allowed: the docs platform's `docs-app`, for the chat panel, and
+OrcaUI's app client, for portal.umccr.org and orcaui.umccr.org and their dev hosts. A token from any other client,
+such as a machine token from the OrcaBus token service, gets `401`. `/health` and the
 API docs under `/schema/` need no token; API Gateway answers them itself, so no function runs without a token. A
-missing, expired or foreign token gets `401`; refresh it and retry once. The [audit log](#the-audit-log) also needs
-the token's `cognito:groups` to include the audit group, `admin`.
+missing, expired or foreign token gets `401`; refresh it and retry once. In prod, the [audit log](#the-audit-log) also needs
+the token's `cognito:groups` to include the audit group, `admin`; in beta, for now, any accepted token reads it.
 
 The authorizer passes on the reader's `sub`, client ID, email and groups. The email is kept only in the audit log,
 never in logs or records.
@@ -89,9 +91,10 @@ as text; never insert it into a page as HTML. Titles and snippets are plain text
 
 ## The audit log
 
-For administrators: who asked what, how it was answered, and what it cost, kept 30 days. Only members of the audit
-group, `admin` in the `data-portal-<stage>` pool (`AUDIT_GROUP` in `infrastructure/stage/config.ts`), may read it;
-anyone else gets `403 forbidden`. It holds answered, not-covered and failed exchanges. Requests refused before an
+For administrators: who asked what, how it was answered, and what it cost, kept 30 days. Who may read it is
+`AUDIT_GROUP` in `infrastructure/stage/config.ts`. In prod, only members of the `admin` group in the
+`data-portal-prod` pool may, and anyone else gets `403 forbidden`. In beta it is `*` for now: any token the API
+accepts, as for chat and search. It holds answered, not-covered and failed exchanges. Requests refused before an
 answer started, over the budget or invalid, are not in it.
 
 | Endpoint                                    | Query                                                                                                                | Response                                                                                                                                                                                                         |

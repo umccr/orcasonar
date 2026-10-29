@@ -51,13 +51,13 @@ import { EmailSubscription } from 'aws-cdk-lib/aws-sns-subscriptions';
 import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import { CfnWebACL, CfnWebACLAssociation } from 'aws-cdk-lib/aws-wafv2';
 import { Construct } from 'constructs';
+import { addGitCommitIdOutput, resolveGitCommitId } from '../shared/git-commit';
 import {
-  CERTIFICATE_ARN_PARAMETER_NAME,
-  DEFAULT_COGNITO_USER_POOL_ID_PARAMETER_NAME,
-  HOSTED_ZONE_DOMAIN_PARAMETER_NAME,
-  HOSTED_ZONE_ID_PARAMETER_NAME,
-} from '@orcabus/platform-cdk-constructs/api-gateway';
-import { addGitCommitIdOutput, resolveGitCommitId } from '@orcabus/platform-cdk-constructs/utils';
+  CERTIFICATE_ARN_PARAMETER,
+  HOSTED_ZONE_ID_PARAMETER,
+  HOSTED_ZONE_NAME_PARAMETER,
+  USER_POOL_ID_PARAMETER,
+} from '../shared/platform';
 import { openApiDocument, SCHEMA_PATH, swaggerUiPage } from './api-docs';
 import {
   API_BASE_PATH,
@@ -79,7 +79,7 @@ export interface OrcaSonarBudget {
 export interface OrcaSonarStatelessStackProps extends StackProps {
   /** `beta` or `prod`, for names and logs. */
   readonly stageSlug: string;
-  /** Origins whose pages may call the API from the browser: the docs hosts. */
+  /** Origins whose pages may call the API from the browser: the docs hosts and OrcaUI's. */
   readonly corsAllowOrigins: string[];
   /** SSM parameters holding the Cognito app client IDs whose ID tokens the authorizer accepts. */
   readonly allowedClientIdParameters: string[];
@@ -95,7 +95,7 @@ export interface OrcaSonarStatelessStackProps extends StackProps {
   readonly logRetention: RetentionDays;
   /** Addresses that hear the alarms and the budget's notices by email; each confirms its subscription once. */
   readonly alertEmails: string[];
-  /** The Cognito group whose members may read the audit log. */
+  /** The Cognito group whose members may read the audit log, or `*` for every caller the authorizer accepts. */
   readonly auditGroup: string;
 }
 
@@ -242,7 +242,7 @@ export class OrcaSonarStatelessStack extends Stack {
     const knowledgeBaseArn = `arn:${Aws.PARTITION}:bedrock:${this.region}:${this.account}:knowledge-base/${knowledgeBaseId}`;
     const guardrailId = parameter(SSM_PARAMETERS.guardrailId);
 
-    const zoneName = parameter(HOSTED_ZONE_DOMAIN_PARAMETER_NAME);
+    const zoneName = parameter(HOSTED_ZONE_NAME_PARAMETER);
     const domainName = `${API_DOMAIN_PREFIX}.${zoneName}`;
     const apiUrl = `https://${domainName}/${API_BASE_PATH}`;
 
@@ -324,7 +324,7 @@ export class OrcaSonarStatelessStack extends Stack {
       timeout: Duration.seconds(10),
       memorySize: 256,
       environment: {
-        USER_POOL_ID: parameter(DEFAULT_COGNITO_USER_POOL_ID_PARAMETER_NAME),
+        USER_POOL_ID: parameter(USER_POOL_ID_PARAMETER),
         CLIENT_IDS: Fn.join(',', props.allowedClientIdParameters.map(parameter)),
       },
     });
@@ -518,7 +518,7 @@ export class OrcaSonarStatelessStack extends Stack {
       certificate: Certificate.fromCertificateArn(
         this,
         'Certificate',
-        StringParameter.valueForStringParameter(this, CERTIFICATE_ARN_PARAMETER_NAME)
+        StringParameter.valueForStringParameter(this, CERTIFICATE_ARN_PARAMETER)
       ),
       endpointType: EndpointType.REGIONAL,
       securityPolicy: SecurityPolicy.TLS_1_2,
@@ -527,8 +527,8 @@ export class OrcaSonarStatelessStack extends Stack {
 
     new ARecord(this, 'ApiAlias', {
       zone: HostedZone.fromHostedZoneAttributes(this, 'Zone', {
-        hostedZoneId: StringParameter.valueForStringParameter(this, HOSTED_ZONE_ID_PARAMETER_NAME),
-        zoneName: StringParameter.valueForStringParameter(this, HOSTED_ZONE_DOMAIN_PARAMETER_NAME),
+        hostedZoneId: StringParameter.valueForStringParameter(this, HOSTED_ZONE_ID_PARAMETER),
+        zoneName: StringParameter.valueForStringParameter(this, HOSTED_ZONE_NAME_PARAMETER),
       }),
       recordName: API_DOMAIN_PREFIX,
       target: RecordTarget.fromAlias(new ApiGatewayDomain(domain)),
