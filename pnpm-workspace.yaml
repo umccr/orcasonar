@@ -7,12 +7,16 @@ allowBuilds:
   esbuild: false
   unrs-resolver: false
 
-# sprintf-js (GHSA-hp3w-g68c-fv3c, moderate, denial of service) has no patched version. It reaches only the test
-# tooling, through jest's coverage plugin (babel-plugin-istanbul > js-yaml 3 > argparse 1), never shipped code. Remove
-# this once a patched version or a jest without that path exists.
+# Advisories with no patched version that reach only the infrastructure tests' jest, never shipped code. Remove each
+# once a patched version or a jest without that path exists.
+# - sprintf-js (GHSA-hp3w-g68c-fv3c, moderate, denial of service), through jest's coverage plugin
+#   (babel-plugin-istanbul > js-yaml 3 > argparse 1).
+# - deepmerge 4.3.1 (GHSA-gcqx-w48m-w2h4, low, prototype poisoning), through jest-config, which merges only this
+#   repository's own jest configuration.
 auditConfig:
   ignoreGhsas:
     - GHSA-hp3w-g68c-fv3c
+    - GHSA-gcqx-w48m-w2h4
 overrides:
   '@vitest/mocker@>=2.1.0-beta.7 <4.1.12': '>=4.1.12'
   '@vitest/mocker@>=4.1.11 <4.1.12': '>=4.1.12'

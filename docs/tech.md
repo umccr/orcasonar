@@ -304,8 +304,9 @@ beta by hand from a branch, with dev credentials, see [deploy.md](deploy.md#step
   `api-docs.ts` does.
 - **Dependency scripts** are off: `pnpm-workspace.yaml` turns down the build scripts of the packages that have them
   (`allowBuilds`), since tests, synth and bundling need none, and the pipelines install with `--ignore-scripts`. The
-  workspace ignores one advisory, GHSA-hp3w-g68c-fv3c in `sprintf-js`, which has no fix and reaches only Jest's
-  coverage tooling; remove the exception once a fix exists.
+  workspace ignores two advisories that have no fix and reach only the infrastructure tests' Jest, never shipped code:
+  GHSA-hp3w-g68c-fv3c in `sprintf-js`, through the coverage tooling, and GHSA-gcqx-w48m-w2h4 in `deepmerge`, through
+  `jest-config`. Remove each exception once a fix exists.
 
 ## Change these together
 
