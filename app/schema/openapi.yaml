@@ -93,6 +93,91 @@ paths:
         '204': { description: Recorded }
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
+  /audit/exchanges:
+    get:
+      summary: The audit log, newest first (administrators only)
+      description: |
+        Who asked what, and how it was answered: answered, not-covered and failed exchanges, kept 30 days. Only
+        members of the audit group (`admin` in the data-portal user pool) may read it; anyone else gets `403`. To read
+        the next page, pass `nextCursor` as `cursor` with the same filters: the cursor keeps the window, so `from` and
+        `to` are not needed again.
+      parameters:
+        - { $ref: '#/components/parameters/From' }
+        - { $ref: '#/components/parameters/To' }
+        - name: caller
+          in: query
+          description: Only this reader's exchanges, by Cognito `sub` or email.
+          schema: { type: string, maxLength: 320 }
+        - name: outcome
+          in: query
+          schema: { $ref: '#/components/schemas/AuditOutcome' }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+        - name: cursor
+          in: query
+          description: '`nextCursor` from the previous page.'
+          schema: { type: string }
+      responses:
+        '200':
+          description: A page of exchanges
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [from, to, items]
+                properties:
+                  from: { type: string, format: date-time }
+                  to: { type: string, format: date-time }
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/AuditRow' }
+                  nextCursor:
+                    type: string
+                    description: Present when there may be more; pass it as `cursor`.
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+  /audit/conversations/{conversationId}:
+    get:
+      summary: A whole conversation from the audit log, oldest first (administrators only)
+      parameters:
+        - name: conversationId
+          in: path
+          required: true
+          schema: { type: string, pattern: '^c_[0-9a-f]{32}$' }
+      responses:
+        '200':
+          description: The conversation's exchanges, with their full answers and sources
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversationId, exchanges]
+                properties:
+                  conversationId: { type: string, pattern: '^c_[0-9a-f]{32}$' }
+                  exchanges:
+                    type: array
+                    items: { $ref: '#/components/schemas/AuditExchange' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+  /audit/usage:
+    get:
+      summary: Questions and spend per reader (administrators only)
+      parameters:
+        - { $ref: '#/components/parameters/From' }
+        - { $ref: '#/components/parameters/To' }
+      responses:
+        '200':
+          description: Usage in the window, readers with the most questions first
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditUsage' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
   /health:
     get:
       summary: Whether the API is up. Needs no token; answered by API Gateway, not a function.
@@ -116,6 +201,19 @@ components:
       scheme: bearer
       bearerFormat: JWT
       description: A Cognito ID token from the data-portal user pool, issued to an allowed app client.
+  parameters:
+    From:
+      name: from
+      in: query
+      description: >-
+        Start of the window: a UTC date (its start) or an ISO time in UTC. Defaults to a week before `to`. The window
+        can span at most 31 days.
+      schema: { type: string }
+    To:
+      name: to
+      in: query
+      description: End of the window, a UTC date (its end) or an ISO time in UTC. Defaults to now.
+      schema: { type: string }
   responses:
     Error:
       description: An error
@@ -202,6 +300,100 @@ components:
         url: { type: string }
         updated: { type: string }
         markdown: { type: string }
+    AuditOutcome:
+      type: string
+      enum: [answered, not-covered, failed]
+    AuditCaller:
+      type: object
+      required: [id, clientId]
+      properties:
+        id: { type: string, description: "The reader's Cognito `sub`" }
+        email: { type: string, description: 'From the ID token, lower-cased' }
+        clientId: { type: string }
+    AuditRow:
+      type: object
+      required: [exchangeId, conversationId, at, caller, outcome, question, citations]
+      properties:
+        exchangeId: { type: string, pattern: '^x_[0-9a-f]{32}$' }
+        conversationId: { type: string, pattern: '^c_[0-9a-f]{32}$' }
+        at: { type: string, format: date-time }
+        caller: { $ref: '#/components/schemas/AuditCaller' }
+        outcome: { $ref: '#/components/schemas/AuditOutcome' }
+        errorCode: { type: string, description: 'Why a failed exchange failed, as an error code' }
+        question: { type: string }
+        answerPreview:
+          { type: string, description: 'The start of the answer, up to 280 characters' }
+        sites: { type: array, items: { type: string } }
+        citations: { type: integer, description: 'How many sources the answer cited' }
+        costUsd: { type: number }
+        guardrail: { type: string, enum: [none, intervened] }
+        latencyMs: { type: integer }
+    AuditExchange:
+      type: object
+      required: [exchangeId, at, caller, outcome, question]
+      properties:
+        exchangeId: { type: string, pattern: '^x_[0-9a-f]{32}$' }
+        at: { type: string, format: date-time }
+        caller: { $ref: '#/components/schemas/AuditCaller' }
+        outcome: { $ref: '#/components/schemas/AuditOutcome' }
+        errorCode: { type: string }
+        question: { type: string }
+        sites: { type: array, items: { type: string } }
+        answer: { type: string, description: 'Markdown, as the reader saw it' }
+        sources:
+          type: array
+          items:
+            type: object
+            required: [id, url, score]
+            properties:
+              id: { type: string }
+              url: { type: string }
+              score: { type: number }
+        modelId: { type: string }
+        usage: { $ref: '#/components/schemas/Usage' }
+        costUsd: { type: number }
+        guardrail: { type: string, enum: [none, intervened] }
+        latencyMs: { type: integer }
+    AuditUsage:
+      type: object
+      required: [from, to, totals, callers]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        totals:
+          type: object
+          required: [people, questions, costUsd]
+          properties:
+            people: { type: integer }
+            questions: { type: integer }
+            costUsd: { type: number }
+        callers:
+          type: array
+          items:
+            type: object
+            required:
+              [
+                id,
+                questions,
+                answered,
+                notCovered,
+                failed,
+                costUsd,
+                inputTokens,
+                outputTokens,
+                lastAt,
+              ]
+            properties:
+              id: { type: string }
+              email: { type: string }
+              questions: { type: integer }
+              answered: { type: integer }
+              notCovered: { type: integer }
+              failed: { type: integer }
+              costUsd: { type: number }
+              inputTokens: { type: integer }
+              outputTokens: { type: integer }
+              lastAt: { type: string, format: date-time }
     Usage:
       type: object
       required: [inputTokens, outputTokens]

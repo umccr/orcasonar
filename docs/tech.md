@@ -105,11 +105,16 @@ the tests ran.
 - **The stream** is `meta`, `delta`…, `citations`, `done`, and an `error` event ends it early. Errors are caught
   inside the stream's callback rather than in `streamSSE`'s `onError`, after which Hono would also send the raw error
   message, with account IDs and ARNs in it, as a second `error` event.
-- **The caller** comes from the authorizer, as `sub` and `clientId` in `requestContext.authorizer`. Only `server.ts`
-  sets `devCaller`, the fixed caller for local development.
-- **Logs** are one JSON line per event, through `log()`, with an `outcome`. They never hold the question or the
-  answer: `errorDetail(error, [question, answer])` cuts both out of an error's message before it is logged.
-- **Writes after an answer** are best-effort. A turn or record that fails to save is logged as `write-error`, and
+- **The caller** comes from the authorizer, as `sub`, `clientId`, `email` and `groups` (one string, separated by
+  spaces) in `requestContext.authorizer`. Only `server.ts` sets `devCaller`, the fixed caller for local development.
+- **Logs** are one JSON line per event, through `log()`, with an `outcome`. They never hold the question, the answer
+  or the reader's email: `errorDetail(error, [question, answer])` cuts the question and the answer out of an error's
+  message before it is logged.
+- **The audit log** is read only by members of `AUDIT_GROUP`, which only the audit function is given, so the audit
+  routes refuse everyone on any other function. Each read is logged as `audit-read`, with the viewer's `sub` and
+  never what it returned.
+- **Writes after an answer** are best-effort. A turn, record or audit entry that fails to save is logged as
+  `write-error`, and
   `done` still follows, because the reader already has the answer.
 - **Time** for the budget is Melbourne's (`lib/time.ts`), so allowances renew at midnight there. Records are filed
   under their UTC date.
@@ -127,6 +132,7 @@ renamed outcome silently stops its alarm.
 | `stream-error`, `answer-error`           | the chat function, with the error's `code` | `AnswersFailedAlarm`, when `code` is `unavailable` |
 | `error`                                  | either API function: an unexpected error   | `AnswersFailedAlarm`, for the chat function's      |
 | `settle-error`, `write-error`            | the chat function, after an answer         | `WritesFailedAlarm`                                |
+| `audit-read`                             | the audit function, for each read          |                                                    |
 | `parameter-error`                        | the chat function, when SSM cannot be read |                                                    |
 | `started`, `job-running`, `job-complete` | the ingest run function                    |                                                    |
 | `job-failed`                             | the ingest run function                    | `IngestJobsFailedAlarm`                            |
@@ -144,8 +150,15 @@ with the Sonar key. Items expire through `expiresAt`, in seconds since the epoch
 | the team's spend today       | `spend`              | `day#<YYYY-MM-DD>`                 | 40 days after its last change  |
 | the month's spend            | `spend`              | `month#<YYYY-MM>`                  | 400 days after its last change |
 | a conversation's turn        | `conversation#<c_…>` | `turn#<ISO time>`, with `owner`    | after 30 days                  |
+| an exchange in the audit log | `audit#<c_…>`        | `<ISO time>#<x_…>`, with `auditPk` | after 30 days                  |
 | the stale mark               | `ingest`             | `stale`, with `at` and `revision`  | never                          |
 | the job started for the mark | `ingest`             | `job`, with `jobId` and `revision` | never                          |
+
+Audit entries also carry `auditPk`, always `exchange`, and `at`, the keys of the one index, `audit-by-time`, which
+lists them by time; only audit items have `auditPk`, so the index holds nothing else. A caller or an outcome is
+filtered as the entries are read, which reads every entry in the window; the budget keeps that to about a hundred a
+day. A table update can create one index at most, so a second index, such as one by caller, needs a deploy of its
+own.
 
 The three spend counters change together in one transaction, so they always agree, and a hold is conditional on the
 caller's and the day's counters being under their limits. The records bucket holds
@@ -304,6 +317,7 @@ beta by hand from a branch, with dev credentials, see [deploy.md](deploy.md#step
 | an error code                                                                   | `ErrorCode` in `app/src/lib/errors.ts`, the enum in `openapi.yaml`, `GATEWAY_ERRORS` in `stateless-stack.ts` if API Gateway can return it, and [api.md](api.md#errors)                                                                                                                    |
 | a limit per request: question length, history, passages or answer tokens        | keep `ANSWER_HOLD_USD` (`app/src/services/budget.ts`) above the most an answer can then cost, and update `openapi.yaml` and [api.md](api.md#limits)                                                                                                                                       |
 | a log `outcome`                                                                 | the metric filters in `stateless-stack.ts`, and the query in [runbook.md](runbook.md#an-alarm-fired)                                                                                                                                                                                      |
+| the audit index                                                                 | `AUDIT_INDEX` in both `app/src/aws/dynamodb.ts` and `infrastructure/stage/constants.ts`. Deploy the stateful stack to prod before the stateless stack that queries a new index.                                                                                                           |
 | the guardrail's policies                                                        | nothing in the stateless stack, which reads the new version from SSM; run the stateless pipeline afterwards so its fallback version moves too, then delete old versions ([runbook](runbook.md#change-the-guardrail))                                                                      |
 | the knowledge base or its data source                                           | check the stateful diff for a replacement: a new knowledge base starts empty, so start an ingestion job after the deploy                                                                                                                                                                  |
 | a docs host                                                                     | `DOCS_ORIGINS` here and `DOCS_DOMAIN_NAMES` in `umccr/docs-platform`'s `infrastructure/config.ts`                                                                                                                                                                                         |

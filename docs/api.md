@@ -22,7 +22,11 @@ hashes, under a Content-Security-Policy that allows nothing else (`infrastructur
 Send a Cognito ID token from the `data-portal-<stage>` pool, issued to an allowed app client, as
 `Authorization: Bearer <token>`. Release 1 allows the docs platform's `docs-app` client only. `/health` and the
 API docs under `/schema/` need no token; API Gateway answers them itself, so no function runs without a token. A
-missing, expired or foreign token gets `401`; refresh it and retry once.
+missing, expired or foreign token gets `401`; refresh it and retry once. The [audit log](#the-audit-log) also needs
+the token's `cognito:groups` to include the audit group, `admin`.
+
+The authorizer passes on the reader's `sub`, client ID, email and groups. The email is kept only in the audit log,
+never in logs or records.
 
 ## Asking a question
 
@@ -83,6 +87,31 @@ as text; never insert it into a page as HTML. Titles and snippets are plain text
 | `POST /feedback`      | `{exchangeId, rating: "up" or "down", comment?}`                | `204`                                                              |
 | `GET /health`         | no token; answered by API Gateway, never reaches a function     | `{status: "ok", version, stage}`; `version` is the deployed commit |
 
+## The audit log
+
+For administrators: who asked what, how it was answered, and what it cost, kept 30 days. Only members of the audit
+group, `admin` in the `data-portal-<stage>` pool (`AUDIT_GROUP` in `infrastructure/stage/config.ts`), may read it;
+anyone else gets `403 forbidden`. It holds answered, not-covered and failed exchanges. Requests refused before an
+answer started, over the budget or invalid, are not in it.
+
+| Endpoint                                    | Query                                                                                                                | Response                                                                                                                                                                                                         |
+| ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /audit/exchanges`                      | `from?`, `to?`, `caller?` (a `sub` or an email, in any case), `outcome?`, `limit?` (1 to 100, default 50), `cursor?` | `{from, to, items: [{exchangeId, conversationId, at, caller: {id, email, clientId}, outcome, errorCode?, question, answerPreview, sites, citations, costUsd, guardrail, latencyMs}], nextCursor?}`, newest first |
+| `GET /audit/conversations/{conversationId}` |                                                                                                                      | `{conversationId, exchanges: [...]}`, oldest first, each with its caller, the whole answer, its sources, model, tokens and cost; `404` for a conversation the audit log does not hold                            |
+| `GET /audit/usage`                          | `from?`, `to?`                                                                                                       | `{from, to, totals: {people, questions, costUsd}, callers: [{id, email, questions, answered, notCovered, failed, costUsd, inputTokens, outputTokens, lastAt}]}`, readers with the most questions first           |
+
+`from` and `to` are UTC dates or ISO times in UTC. A date alone is the start of that day for `from`, and its end for
+`to`. The window defaults to the week up to now, and can span at most 31 days. `answerPreview` is the answer's first
+280 characters; a failed exchange has its `errorCode` and no answer. For the next page, pass `nextCursor` as `cursor`
+with the same `caller`, `outcome` and `limit`. The cursor keeps the first page's window, so there is no need to pass
+`from` or `to` again.
+
+```http
+GET /api/v1/audit/exchanges?caller=someone%40umccr.org&limit=20 HTTP/1.1
+Host: sonar.prod.umccr.org
+Authorization: Bearer eyJraWQiOi…
+```
+
 ## Errors
 
 Every error has one shape: `{"error": {"code", "message", "retryAfter"?}}`, including those API Gateway returns
@@ -90,10 +119,10 @@ itself, such as for a missing token, a request WAF blocked, throttling or an unk
 
 | Status | `code`            | When                                                                                                                |
 | ------ | ----------------- | ------------------------------------------------------------------------------------------------------------------- |
-| 400    | `invalid-request` | the body fails validation                                                                                           |
+| 400    | `invalid-request` | the body or the query fails validation                                                                              |
 | 401    | `unauthorized`    | no token, an expired one, or one from a client that is not allowed                                                  |
-| 403    | `forbidden`       | WAF blocked the request, or the conversation belongs to another caller                                              |
-| 404    | `not-found`       | no such document or endpoint                                                                                        |
+| 403    | `forbidden`       | WAF blocked the request, the conversation belongs to another caller, or the caller is not in the audit group        |
+| 404    | `not-found`       | no such document, conversation or endpoint                                                                          |
 | 429    | `over-budget`     | the caller's or the team's allowance for today is used; `Retry-After` gives the seconds until midnight in Melbourne |
 | 429    | `throttled`       | too many requests per second                                                                                        |
 | 503    | `unavailable`     | Bedrock is throttling, the answer stopped early, or too many answers were starting at once                          |

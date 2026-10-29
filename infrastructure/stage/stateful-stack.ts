@@ -14,7 +14,13 @@ import {
   CfnGuardrailVersion,
   CfnKnowledgeBase,
 } from 'aws-cdk-lib/aws-bedrock';
-import { AttributeType, BillingMode, Table, TableEncryption } from 'aws-cdk-lib/aws-dynamodb';
+import {
+  AttributeType,
+  BillingMode,
+  ProjectionType,
+  Table,
+  TableEncryption,
+} from 'aws-cdk-lib/aws-dynamodb';
 import { AccountRootPrincipal, PolicyStatement, Role, ServicePrincipal } from 'aws-cdk-lib/aws-iam';
 import { Key } from 'aws-cdk-lib/aws-kms';
 import { BlockPublicAccess, Bucket, BucketEncryption } from 'aws-cdk-lib/aws-s3';
@@ -22,6 +28,7 @@ import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { addGitCommitIdOutput } from '@orcabus/platform-cdk-constructs/utils';
 import {
+  AUDIT_INDEX,
   DOCS_PREFIX,
   DOCS_PUBLISHER_ROLE_NAME,
   DOCS_PUBLISHER_ROLE_PATH,
@@ -130,7 +137,7 @@ export class OrcaSonarStatefulStack extends Stack {
       removalPolicy: props.removalPolicy,
     });
 
-    // Budget counters, conversation turns and the ingestion flag. Items expire through `expiresAt`.
+    // Budget counters, conversation turns, the audit log and the ingestion flag. Items expire through `expiresAt`.
     const table = new Table(this, 'Table', {
       tableName: `OrcaSonarTable-${props.stageSlug}`,
       partitionKey: { name: 'pk', type: AttributeType.STRING },
@@ -142,6 +149,14 @@ export class OrcaSonarStatefulStack extends Stack {
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       deletionProtection: props.deletionProtection,
       removalPolicy: props.removalPolicy,
+    });
+    // The audit log by time. Only audit items carry `auditPk`, so the index holds nothing else. A table update can
+    // create one index at most, so a second, such as one by caller, needs a deploy of its own.
+    table.addGlobalSecondaryIndex({
+      indexName: AUDIT_INDEX,
+      partitionKey: { name: 'auditPk', type: AttributeType.STRING },
+      sortKey: { name: 'at', type: AttributeType.STRING },
+      projectionType: ProjectionType.ALL,
     });
 
     const knowledgeBase = this.knowledgeBase(props, key, ingestBucket);

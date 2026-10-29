@@ -27,6 +27,7 @@ and [ADR-0007, chat through OrcaSonar](https://github.com/umccr/docs-platform/bl
 | Sources in release 1  | UMCCR documentation only, from docs.umccr.org. Databases and APIs for real data come later.                                                                                                       | built                                         |
 | Knowledge base        | Bedrock managed knowledge base, serverless and pay as you go, with the default minimal configuration.                                                                                             | built                                         |
 | Questions and answers | Kept 30 days in a bucket, for evaluation.                                                                                                                                                         | built                                         |
+| Audit log             | Who asked what and the answer, with the reader's email, kept 30 days in the Sonar table. `/api/v1/audit/*` lists it, and usage per reader, for the data-portal `admin` group only.                | built, not yet deployed                       |
 | Name                  | OrcaSonar; `orcasonar` for the repository, stacks and SSM names.                                                                                                                                  | decided                                       |
 | Model                 | Claude Sonnet 5 through the Australian cross-Region profile; Haiku 4.5 is allowed too, if its answers are good enough.                                                                            | built; blocked in dev by the region policy    |
 | Budget                | $50 a month in prod and $10 in dev and stg, enforced by OrcaSonar itself, with an AWS Budgets backstop.                                                                                           | built                                         |
@@ -63,10 +64,11 @@ flowchart TB
         api -- "verify the token" --> authz["Lambda authorizer<br/>Cognito ID token"]
         api -- "token routes" --> chat["Chat Lambda<br/>POST /chat, streamed"]
         api -- "token routes" --> query["Query Lambda<br/>/search, /documents, /feedback"]
+        api -- "token routes,<br/>admin group only" --> audit["Audit Lambda<br/>/audit/*"]
     end
 
     subgraph stateful["OrcaSonarStatefulStack, under the Sonar KMS key"]
-        table[("Sonar table<br/>spend, turns")]
+        table[("Sonar table<br/>spend, turns, audit log")]
         records[("Records bucket<br/>30 days")]
         kb[("Managed<br/>knowledge base")]
         ingest[("Ingest bucket<br/>docs/")]
@@ -84,6 +86,7 @@ flowchart TB
     claude --- guardrail
     query -- "Retrieve" --> kb
     query --> ingest & records
+    audit --> table
     publish -- "docs/#lt;slug#gt;/" --> ingest
     ingest -- "indexed when changed" --> kb
 ```
@@ -97,7 +100,8 @@ Release 1 has one caller; the later ones are drawn to make room for them, not be
 | Lambda authorizer      | Verifies the Cognito ID token with `aws-jwt-verify`: the `data-portal-<stage>` pool, token use `id`, and an allowed client. Release 1 allows only `docs-app`; the `docs-app` client never goes on the OrcaBus API list.                                                                                                                                      |
 | Chat Lambda            | Holds the most an answer can cost against the budget, retrieves, builds the prompt, calls Claude with the guardrail, streams server-sent events, then settles the hold at the answer's cost and records the exchange. Logs hold the reader's `sub` and the outcome, never the question.                                                                      |
 | Query Lambda           | `/search`, `/documents/{id}` and `/feedback`, answered as ordinary JSON.                                                                                                                                                                                                                                                                                     |
-| Sonar table            | One DynamoDB table: spend per reader per day, team spend per month, conversation turns (expire after 30 days) and the ingestion state. Callers are keyed by `sub` for people and by client ID for machine callers.                                                                                                                                           |
+| Audit Lambda           | `/audit/exchanges`, `/audit/conversations/{id}` and `/audit/usage`: who asked what, the answers, and usage per reader. Only members of the data-portal pool's `admin` group get past it; it reads only the table, and logs who read what without logging what it returned.                                                                                   |
+| Sonar table            | One DynamoDB table: spend per reader per day, team spend per month, conversation turns and the audit log (both expire after 30 days) and the ingestion state. Callers are keyed by `sub` for people and by client ID for machine callers.                                                                                                                    |
 | Ingest bucket          | The only input to the knowledge base. Only the docs pipeline's `docs-publisher` role writes, and only under `docs/`. Versioned, so an accidental delete is recoverable.                                                                                                                                                                                      |
 | Managed knowledge base | One per stage: managed embeddings, hybrid search and the managed reranker. Each passage keeps its page's `doc_id`, `url`, `site` and `title`, so sources become links and a question can stay within one site.                                                                                                                                               |
 | Guardrail              | Applied to every model call: denied topics (medical advice about a person, personal data about patients), masking of personal data in answers, and a grounding check that flags answers the passages don't support.                                                                                                                                          |
@@ -115,9 +119,9 @@ flowchart TD
     waf -- yes --> blocked["403, blocked"]
     waf -- no --> route{"Which route?"}
     route -- "OPTIONS, CORS preflight<br/>GET /api/v1/health<br/>GET /schema/swagger-ui/<br/>GET /schema/openapi.json" --> mock["API Gateway answers from a mock integration:<br/>a fixed body; no function runs"]
-    route -- "POST /api/v1/chat, /search, /feedback<br/>GET /api/v1/documents/{id}" --> authz{"Lambda authorizer: a valid<br/>Cognito ID token from an allowed client?"}
+    route -- "POST /api/v1/chat, /search, /feedback<br/>GET /api/v1/documents/{id}, /api/v1/audit/*" --> authz{"Lambda authorizer: a valid<br/>Cognito ID token from an allowed client?"}
     authz -- no --> denied["401; no function runs"]
-    authz -- yes --> fn["Chat or query Lambda,<br/>given the caller's sub and client ID"]
+    authz -- yes --> fn["Chat, query or audit Lambda,<br/>given the caller's sub, client ID, email and groups"]
     route -- "anything else" --> missing["404 not-found, from API Gateway"]
 ```
 
@@ -139,17 +143,20 @@ portal calls OrcaBus. Responses are JSON, except `/chat`, which streams when ask
 `{"error": {"code", "message", "retryAfter"?}}`. Requests, the stream, every error code and the limits are in
 [api.md](api.md).
 
-| Method and path              | Token | Request                                   | Response                                                                                                                                                     | Status |
-| ---------------------------- | ----- | ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
-| `POST /api/v1/chat`          | yes   | `{query, conversationId?, sites?, mode?}` | with `Accept: text/event-stream`, events `meta`, `delta`…, `citations`, `done`; otherwise one JSON object with the answer, citations, `exchangeId` and usage | built  |
-| `POST /api/v1/search`        | yes   | `{query, topK?, sites?}`, `topK` up to 20 | `{results: [{id, title, url, site, snippet, score}]}`, with no model call                                                                                    | built  |
-| `GET /api/v1/documents/{id}` | yes   | a `doc_id`, URL-encoded                   | `{id, title, url, site, updated, markdown}`                                                                                                                  | built  |
-| `POST /api/v1/feedback`      | yes   | `{exchangeId, rating, comment?}`          | `204`                                                                                                                                                        | built  |
-| `GET /api/v1/health`         | no    |                                           | `{status, version, stage}`, from API Gateway                                                                                                                 | built  |
-| `GET /schema/swagger-ui/`    | no    |                                           | Swagger UI for the contract                                                                                                                                  | built  |
-| `GET /schema/openapi.json`   | no    |                                           | the contract, for clients and for AgentCore Gateway to turn into MCP tools                                                                                   | built  |
-| `GET /api/v1/sources`        | yes   |                                           | what is indexed, per source: documents and the last sync                                                                                                     | later  |
-| `GET /api/v1/usage`          | yes   |                                           | the caller's allowance left today                                                                                                                            | later  |
+| Method and path                        | Token            | Request                                          | Response                                                                                                                                                     | Status |
+| -------------------------------------- | ---------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
+| `POST /api/v1/chat`                    | yes              | `{query, conversationId?, sites?, mode?}`        | with `Accept: text/event-stream`, events `meta`, `delta`…, `citations`, `done`; otherwise one JSON object with the answer, citations, `exchangeId` and usage | built  |
+| `POST /api/v1/search`                  | yes              | `{query, topK?, sites?}`, `topK` up to 20        | `{results: [{id, title, url, site, snippet, score}]}`, with no model call                                                                                    | built  |
+| `GET /api/v1/documents/{id}`           | yes              | a `doc_id`, URL-encoded                          | `{id, title, url, site, updated, markdown}`                                                                                                                  | built  |
+| `POST /api/v1/feedback`                | yes              | `{exchangeId, rating, comment?}`                 | `204`                                                                                                                                                        | built  |
+| `GET /api/v1/audit/exchanges`          | yes, admin group | `from?, to?, caller?, outcome?, limit?, cursor?` | the audit log, newest first: who asked, the question, the start of the answer, outcome and cost                                                              | built  |
+| `GET /api/v1/audit/conversations/{id}` | yes, admin group | a `conversationId`                               | the whole conversation with full answers and sources                                                                                                         | built  |
+| `GET /api/v1/audit/usage`              | yes, admin group | `from?, to?`                                     | questions, outcomes, tokens and cost per reader                                                                                                              | built  |
+| `GET /api/v1/health`                   | no               |                                                  | `{status, version, stage}`, from API Gateway                                                                                                                 | built  |
+| `GET /schema/swagger-ui/`              | no               |                                                  | Swagger UI for the contract                                                                                                                                  | built  |
+| `GET /schema/openapi.json`             | no               |                                                  | the contract, for clients and for AgentCore Gateway to turn into MCP tools                                                                                   | built  |
+| `GET /api/v1/sources`                  | yes              |                                                  | what is indexed, per source: documents and the last sync                                                                                                     | later  |
+| `GET /api/v1/usage`                    | yes              |                                                  | the caller's allowance left today                                                                                                                            | later  |
 
 `doc_id` is a site's slug and a page's path, such as `platform:onboarding`, so citations, `/documents/{id}` and docs
 links all agree. `mode` is reserved for a later Plan mode; release 1 answers in Ask mode only.
@@ -257,7 +264,7 @@ in a resource in our account.
 | The index: chunks and vectors   | Bedrock's managed vector store, Sydney | encrypted with the Sonar KMS key, chosen when the knowledge base is created; AWS-managed storage, not a resource in our account                                        |
 | Embedding and reranking         | service-managed models                 | AWS doesn't say where they run: ask before indexing anything sensitive. Bringing Titan Text Embeddings V2 instead switches off the managed reranker                    |
 | Questions and answers in flight | Claude, `au.` profile                  | processed in Sydney and Melbourne only. Bedrock keeps no prompts or answers and doesn't train on them; model providers have no access to the accounts where models run |
-| Our records                     | Sonar table, records bucket, logs      | our account and our key; deleted after 30 days; logs never hold the question                                                                                           |
+| Our records                     | Sonar table, records bucket, logs      | our account and our key; deleted after 30 days; logs never hold the question or the email; the audit log, with emails, is read only by the audit group                 |
 
 Making it enforceable rather than a default:
 
@@ -350,6 +357,16 @@ A record holds the question, the answer, the cited documents and scores, the mod
 whether the guardrail intervened, and the reader's Cognito `sub`. Only the platform team should read the bucket;
 today that rests on who has access to the account, not on a bucket policy.
 
+The same exchanges, and the failed ones, also go into an audit log in the Sonar table, with the reader's email from
+their ID token, and expire after the same 30 days. The audit API lists them, and usage per reader, to members of the
+data-portal pool's `admin` group, so portal administrators can read everyone's questions there without account
+access. The group is one setting (`AUDIT_GROUP`), so a group of OrcaSonar's own can replace it. Each read is logged
+with who made it. The email stays out of the logs and the records bucket, so the weekly review and the evaluation
+set are unchanged.
+
+Before readers use the audit log in prod, the docs chat panel's notice should say so: that questions are kept for 30
+days to improve answers, and that UMCCR administrators can review them with the reader's email.
+
 Bedrock's model invocation logging is a setting for the whole account and Region and would capture every Bedrock call
 with full prompts. OrcaSonar writes its own records instead; leave invocation logging off unless OrcaSonar is the
 account's only Bedrock user.
@@ -374,7 +391,7 @@ flowchart LR
 | Stack                     | Holds                                                                                                                                                       | Why it is separate                                   |
 | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
 | `OrcaSonarStatefulStack`  | Sonar KMS key, ingest bucket and its policy for `docs-publisher`, records bucket, Sonar table, managed knowledge base and its `docs` data source, guardrail | data and the index survive API changes; kept in prod |
-| `OrcaSonarStatelessStack` | REST API and custom domain, WAF, authorizer, chat and query Lambdas, the API docs, ingestion scheduling, alarms, the AWS Budgets backstop                   | changes often and is safe to replace                 |
+| `OrcaSonarStatelessStack` | REST API and custom domain, WAF, authorizer, chat, query and audit Lambdas, the API docs, ingestion scheduling, alarms, the AWS Budgets backstop            | changes often and is safe to replace                 |
 
 What it reads and writes in SSM:
 

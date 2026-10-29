@@ -1,11 +1,14 @@
 import type { AppDeps } from '../app';
-import { ApiError } from '../lib/errors';
+import { ApiError, invalidRequest } from '../lib/errors';
 import type { AnswerEvent, AnswerRequest, Answerer } from '../services/answer';
 import type { BudgetLimits, OverBudget, Spend, SpendKeys, SpendStore } from '../services/budget';
 import { Budget } from '../services/budget';
 import type { Turn } from '../services/prompt';
 import type { Passage, RetrieveOptions, Retriever } from '../services/retrieval';
 import type {
+  AuditEntry,
+  AuditQuery,
+  AuditStore,
   ConversationStore,
   DocumentStore,
   DocumentView,
@@ -79,6 +82,42 @@ export class MemoryRecordStore implements RecordStore {
 
   async putFeedback(record: FeedbackRecord): Promise<void> {
     this.feedback.push(record);
+  }
+}
+
+export class MemoryAuditStore implements AuditStore {
+  readonly entries: AuditEntry[] = [];
+
+  async put(entry: AuditEntry): Promise<void> {
+    this.entries.push(entry);
+  }
+
+  /** The cursor here is how many matching entries came before; DynamoDB's is the last entry's keys. */
+  async list(query: AuditQuery): Promise<{ items: AuditEntry[]; cursor?: string }> {
+    const matching = (await this.between(query.from, query.to)).filter(
+      (entry) =>
+        (!query.caller || entry.callerId === query.caller || entry.email === query.caller) &&
+        (!query.outcome || entry.outcome === query.outcome)
+    );
+    const start = query.cursor === undefined ? 0 : Number(query.cursor);
+    if (!Number.isInteger(start) || start < 0) {
+      throw invalidRequest('cursor must be one a previous page returned.');
+    }
+    const items = matching.slice(start, start + query.limit);
+    const next = start + items.length;
+    return next < matching.length ? { items, cursor: String(next) } : { items };
+  }
+
+  async between(from: string, to: string): Promise<AuditEntry[]> {
+    return this.entries
+      .filter((entry) => entry.at >= from && entry.at <= to)
+      .sort((a, b) => b.at.localeCompare(a.at));
+  }
+
+  async conversation(conversationId: string): Promise<AuditEntry[]> {
+    return this.entries
+      .filter((entry) => entry.conversationId === conversationId)
+      .sort((a, b) => a.at.localeCompare(b.at));
   }
 }
 
@@ -159,6 +198,7 @@ export interface FakeDeps extends AppDeps {
   readonly spend: MemorySpendStore;
   readonly conversationStore: MemoryConversationStore;
   readonly recordStore: MemoryRecordStore;
+  readonly auditStore: MemoryAuditStore;
   readonly staticRetriever: StaticRetriever;
   readonly scriptedAnswerer: ScriptedAnswerer;
   readonly logs: Record<string, unknown>[];
@@ -176,6 +216,7 @@ export const fakeDeps = (
   const spend = new MemorySpendStore();
   const conversationStore = new MemoryConversationStore();
   const recordStore = new MemoryRecordStore();
+  const auditStore = new MemoryAuditStore();
   const staticRetriever = new StaticRetriever(options.passages ?? SAMPLE_PASSAGES);
   const scriptedAnswerer = options.answerer ?? new ScriptedAnswerer();
   const clock = () => options.now ?? new Date('2026-10-12T03:00:00Z');
@@ -188,6 +229,8 @@ export const fakeDeps = (
     conversations: conversationStore,
     retriever: staticRetriever,
     records: recordStore,
+    audit: auditStore,
+    auditGroup: 'admin',
     documents: new MemoryDocumentStore(options.documents),
     answerer: () => scriptedAnswerer,
     clock,
@@ -195,6 +238,7 @@ export const fakeDeps = (
     spend,
     conversationStore,
     recordStore,
+    auditStore,
     staticRetriever,
     scriptedAnswerer,
     logs,

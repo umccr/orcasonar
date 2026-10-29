@@ -8,13 +8,13 @@ requests that the two pipelines deploy to beta, then to prod after approval.
 Every alarm tells the alerts topic when it fires and when it clears. In the stage account, its name starts with
 `UMCCR-OrcaSonarStatelessStack-` and the alarm's name below.
 
-| Alarm                                                                 | What it means                                                                                                                                             | Where to look                                                                                                                                                                                                                            |
-| --------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `AnswersFailedAlarm`                                                  | Three answers failed within 15 minutes: readers saw "The answer stopped early" or another error.                                                          | The chat function's log lines with `outcome` `stream-error`, `answer-error` or `error`: `error` and `detail` name the call that failed and why. The usual causes are in the deploy guide's [troubleshooting](deploy.md#troubleshooting). |
-| `WritesFailedAlarm`                                                   | A reader got an answer, but its cost could not be settled (`settle-error`), or its turn or record could not be saved (`write-error`; `write` says which). | The chat function's logs. An unsettled answer keeps its whole hold; a lost turn leaves the next follow-up without it; a lost record leaves the exchange out of evaluation.                                                               |
-| `ApiServerErrorsAlarm`                                                | Three 5XX responses within 15 minutes: searches, documents or feedback that failed, or answers that failed before they started streaming.                 | The query function's log lines with `outcome` `error`, and the chat function's for answers.                                                                                                                                              |
-| `ChatErrorsAlarm`, `QueryErrorsAlarm`                                 | A function crashed or timed out; its own errors are answered, so they never count here.                                                                   | The function's logs, and its `Duration` against its timeout.                                                                                                                                                                             |
-| `IngestMarkErrorsAlarm`, `IngestErrorsAlarm`, `IngestJobsFailedAlarm` | Changed documents may not reach the index.                                                                                                                | [The index is stale](#the-index-is-stale).                                                                                                                                                                                               |
+| Alarm                                                                 | What it means                                                                                                                                                          | Where to look                                                                                                                                                                                                                            |
+| --------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AnswersFailedAlarm`                                                  | Three answers failed within 15 minutes: readers saw "The answer stopped early" or another error.                                                                       | The chat function's log lines with `outcome` `stream-error`, `answer-error` or `error`: `error` and `detail` name the call that failed and why. The usual causes are in the deploy guide's [troubleshooting](deploy.md#troubleshooting). |
+| `WritesFailedAlarm`                                                   | A reader got an answer, but its cost could not be settled (`settle-error`), or its turn, record or audit entry could not be saved (`write-error`; `write` says which). | The chat function's logs. An unsettled answer keeps its whole hold; a lost turn leaves the next follow-up without it; a lost record leaves the exchange out of evaluation; a lost audit entry leaves it out of the audit log.            |
+| `ApiServerErrorsAlarm`                                                | Three 5XX responses within 15 minutes: searches, documents or feedback that failed, or answers that failed before they started streaming.                              | The query function's log lines with `outcome` `error`, and the chat function's for answers.                                                                                                                                              |
+| `ChatErrorsAlarm`, `QueryErrorsAlarm`, `AuditErrorsAlarm`             | A function crashed or timed out; its own errors are answered, so they never count here.                                                                                | The function's logs, and its `Duration` against its timeout.                                                                                                                                                                             |
+| `IngestMarkErrorsAlarm`, `IngestErrorsAlarm`, `IngestJobsFailedAlarm` | Changed documents may not reach the index.                                                                                                                             | [The index is stale](#the-index-is-stale).                                                                                                                                                                                               |
 
 The failures, newest first, in CloudWatch Logs Insights on the function's log group:
 
@@ -129,3 +129,21 @@ When a site is unregistered or must not be quoted any more, delete its documents
 Records are under `records/date=YYYY-MM-DD/` and feedback under `feedback/` in the records bucket (its name is in
 `/orcasonar/records-bucket-name`). Only the platform team should have read access. Copy examples for the evaluation
 set into `eval-set/` without the `callerId` field.
+
+## Read the audit log
+
+The audit API lists who asked what, the answers, and usage per reader, for the last 30 days ([api.md](api.md#the-audit-log)).
+Only members of the `admin` group in the `data-portal-<stage>` user pool may read it. To let someone read it, add them
+to that group; their next ID token carries it, within the hour. To use a different group, change `AUDIT_GROUP` in
+`infrastructure/stage/config.ts`.
+
+Call it with an ID token issued to the `docs-app` client, such as the one the docs chat panel holds after sign-in,
+either in Swagger UI at `/schema/swagger-ui/` (**Authorize**) or with curl:
+
+```sh
+curl -H "Authorization: Bearer $TOKEN" 'https://sonar.prod.umccr.org/api/v1/audit/usage'
+curl -H "Authorization: Bearer $TOKEN" 'https://sonar.prod.umccr.org/api/v1/audit/exchanges?outcome=failed'
+```
+
+Each read is logged by the audit function as `outcome` `audit-read`, with the reader's `sub` as `viewer`. Those log
+lines answer the question of who looked at the audit log.

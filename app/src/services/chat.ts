@@ -13,12 +13,17 @@ import {
 } from './prompt';
 import type { Passage, Retriever } from './retrieval';
 import { ANSWER_PASSAGES, retrievalQuery, toCitation } from './retrieval';
-import type { ConversationStore, RecordStore } from './stores';
+import type { AuditStore, ConversationStore, RecordStore } from './stores';
 
-/** Who is asking, from the authorizer: a reader's Cognito `sub` and the app client their token came from. */
+/**
+ * Who is asking, from the authorizer: a reader's Cognito `sub`, the app client their token came from, and their
+ * lower-cased email and groups when the token has them.
+ */
 export interface Caller {
   readonly id: string;
   readonly clientId: string;
+  readonly email?: string;
+  readonly groups?: readonly string[];
 }
 
 export interface ChatDeps {
@@ -28,6 +33,7 @@ export interface ChatDeps {
   readonly retriever: Retriever;
   readonly answerer: Answerer;
   readonly records: RecordStore;
+  readonly audit: AuditStore;
   /** Passages scoring below this are left out; when none remain, the model is not called. */
   readonly minScore: number;
   readonly clock: () => Date;
@@ -150,8 +156,9 @@ export const answerQuestion = async (
     const citations = cited.map((passage) => toCitation(passage, passages.indexOf(passage) + 1));
     await emit({ event: 'citations', data: citations });
 
-    // Logged rather than thrown: a turn or record that fails to save must not turn a complete answer into an error.
-    const save = async (write: 'turn' | 'record', saving: () => Promise<void>) => {
+    // Logged rather than thrown: a turn, record or audit entry that fails to save must not turn a complete answer
+    // into an error.
+    const save = async (write: 'turn' | 'record' | 'audit', saving: () => Promise<void>) => {
       try {
         await saving();
       } catch (error) {
@@ -163,6 +170,23 @@ export const answerQuestion = async (
         });
       }
     };
+    const exchange = {
+      exchangeId: request.exchangeId,
+      conversationId: request.conversationId,
+      at: new Date(started).toISOString(),
+      callerId: request.caller.id,
+      clientId: request.caller.clientId,
+      question: request.question,
+      sites: request.sites,
+      answer,
+      sources: cited.map((passage) => ({ id: passage.id, url: passage.url, score: passage.score })),
+      modelId: modelCalled ? deps.answerer.modelId : undefined,
+      usage: modelCalled ? usage : undefined,
+      costUsd,
+      guardrail,
+      latencyMs: deps.clock().getTime() - started,
+    };
+    const outcome = modelCalled ? 'answered' : 'not-covered';
     await Promise.all([
       save('turn', () =>
         deps.conversations.append(request.conversationId, request.caller.id, {
@@ -170,34 +194,13 @@ export const answerQuestion = async (
           answer,
         })
       ),
-      save('record', () =>
-        deps.records.putExchange({
-          exchangeId: request.exchangeId,
-          conversationId: request.conversationId,
-          at: new Date(started).toISOString(),
-          stage: deps.stage,
-          callerId: request.caller.id,
-          clientId: request.caller.clientId,
-          question: request.question,
-          sites: request.sites,
-          answer,
-          sources: cited.map((passage) => ({
-            id: passage.id,
-            url: passage.url,
-            score: passage.score,
-          })),
-          modelId: modelCalled ? deps.answerer.modelId : undefined,
-          usage: modelCalled ? usage : undefined,
-          costUsd,
-          guardrail,
-          latencyMs: deps.clock().getTime() - started,
-        })
-      ),
+      save('record', () => deps.records.putExchange({ ...exchange, stage: deps.stage })),
+      save('audit', () => deps.audit.put({ ...exchange, email: request.caller.email, outcome })),
     ]);
 
     await emit({ event: 'done', data: { usage } });
     deps.log({
-      outcome: modelCalled ? 'answered' : 'not-covered',
+      outcome,
       caller: request.caller.id,
       exchangeId: request.exchangeId,
       passages: passages.length,

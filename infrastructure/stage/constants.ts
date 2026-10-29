@@ -36,5 +36,11 @@ export const SSM_PARAMETERS = {
 /** The docs platform's public Cognito client, written by `umccr/infrastructure` `cognito_aai/app_docs.tf`. */
 export const DOCS_APP_CLIENT_ID_PARAMETER = '/cognito/docs-app/app-client-id';
 
+/**
+ * The Sonar table's index of the audit log by time: `auditPk`, the same on every audit item, and `at`. Keep in step
+ * with `AUDIT_INDEX` in `app/src/aws/dynamodb.ts`.
+ */
+export const AUDIT_INDEX = 'audit-by-time';
+
 /** Questions, answers and feedback are kept this long, for evaluation, then deleted. */
 export const RECORD_RETENTION_DAYS = 30;

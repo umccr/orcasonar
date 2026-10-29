@@ -5,12 +5,17 @@ export interface VerifiedClaims {
   readonly sub: string;
   /** For an ID token, the app client the reader signed in through. */
   readonly aud: string;
+  /** The reader's email, for the audit log. */
+  readonly email?: string;
+  /** The reader's Cognito groups; members of the audit group may read the audit log. */
+  readonly groups: readonly string[];
 }
 
 /**
  * The API's Lambda authorizer (a TOKEN authorizer on `Authorization`). It accepts a Cognito ID token issued to an
- * allowed app client, the way the OrcaBus APIs accept the portal's, and passes the reader's `sub` and client ID to the
- * functions.
+ * allowed app client, the way the OrcaBus APIs accept the portal's, and passes the reader's `sub`, client ID, email and
+ * groups to the functions. Context values must be strings, so the groups go as one, separated by spaces, which Cognito
+ * group names cannot contain.
  *
  * API Gateway caches the result for five minutes per token, so the policy allows every route of the stage: a token
  * that is valid for one route is valid for all of them. Anything else is `Unauthorized`, which API Gateway turns into
@@ -40,6 +45,11 @@ export const createAuthorizer =
           { Action: 'execute-api:Invoke', Effect: 'Allow', Resource: `${apiArn}/${stage}/*/*` },
         ],
       },
-      context: { sub: claims.sub, clientId: claims.aud },
+      context: {
+        sub: claims.sub,
+        clientId: claims.aud,
+        email: claims.email ?? '',
+        groups: claims.groups.join(' '),
+      },
     };
   };

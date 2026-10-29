@@ -9,13 +9,15 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
+  QueryCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { mockClient } from 'aws-sdk-client-mock';
 import { ApiError } from '../lib/errors';
 import type { AnswerEvent } from '../services/answer';
+import type { AuditEntry } from '../services/stores';
 import { BedrockAnswerer, KnowledgeBaseIngestion, KnowledgeBaseRetriever } from './bedrock';
-import { DynamoIngestState, DynamoSpendStore } from './dynamodb';
+import { AUDIT_INDEX, DynamoAuditStore, DynamoIngestState, DynamoSpendStore } from './dynamodb';
 import { metadataValues, S3DocumentStore } from './s3';
 import { cachedParameter } from './ssm';
 
@@ -343,6 +345,134 @@ describe('DynamoIngestState', () => {
     expect(dynamodb.commandCalls(DeleteCommand)[0]!.args[0].input).toMatchObject({
       Key: { pk: 'ingest', sk: 'job' },
       ExpressionAttributeValues: { ':value': 'job-1' },
+    });
+  });
+});
+
+describe('DynamoAuditStore', () => {
+  const dynamodb = mockClient(DynamoDBDocumentClient);
+  beforeEach(() => dynamodb.reset());
+
+  const store = () =>
+    new DynamoAuditStore(DynamoDBDocumentClient.from(new DynamoDBClient({})), 'table');
+  const conversation = `c_${'a'.repeat(32)}`;
+  const window = { from: '2026-10-01T00:00:00.000Z', to: '2026-10-31T23:59:59.999Z' };
+  const entry = (day: number): AuditEntry => ({
+    exchangeId: `x_${String(day).padStart(32, '0')}`,
+    conversationId: conversation,
+    at: `2026-10-${String(day).padStart(2, '0')}T00:00:00.000Z`,
+    callerId: 'reader-1',
+    email: 'reader@umccr.org',
+    clientId: 'docs-app',
+    outcome: 'answered',
+    question: 'How do I add a site?',
+    answer: 'Add one entry.',
+    costUsd: 0.02,
+  });
+  const item = (day: number) => ({
+    pk: `audit#${conversation}`,
+    sk: `${entry(day).at}#${entry(day).exchangeId}`,
+    auditPk: 'exchange',
+    expiresAt: 1_800_000_000,
+    ...entry(day),
+  });
+  const queries = () => dynamodb.commandCalls(QueryCommand).map((call) => call.args[0].input);
+
+  test('keeps each exchange under its conversation, in the audit index, for 30 days', async () => {
+    dynamodb.on(PutCommand).resolves({});
+    const now = Math.floor(Date.now() / 1000);
+    await store().put(entry(11));
+    const stored = dynamodb.commandCalls(PutCommand)[0]!.args[0].input.Item!;
+    expect(stored).toEqual({
+      pk: `audit#${conversation}`,
+      sk: `2026-10-11T00:00:00.000Z#x_${'0'.repeat(30)}11`,
+      auditPk: 'exchange',
+      ...entry(11),
+      expiresAt: expect.any(Number),
+    });
+    expect(stored['expiresAt']).toBeGreaterThanOrEqual(now + 30 * 24 * 60 * 60);
+    expect(stored['expiresAt']).toBeLessThan(now + 30 * 24 * 60 * 60 + 60);
+  });
+
+  test('lists through the index, newest first, filtering as it reads', async () => {
+    dynamodb.on(QueryCommand).resolves({ Items: [item(12), item(11)] });
+    const page = await store().list({
+      ...window,
+      caller: 'reader@umccr.org',
+      outcome: 'answered',
+      limit: 10,
+    });
+    expect(page).toEqual({ items: [entry(12), entry(11)] });
+    expect(queries()[0]).toMatchObject({
+      IndexName: AUDIT_INDEX,
+      KeyConditionExpression: '#auditPk = :partition AND #at BETWEEN :from AND :to',
+      FilterExpression: '(#callerId = :caller OR #email = :caller) AND #outcome = :outcome',
+      ExpressionAttributeValues: {
+        ':partition': 'exchange',
+        ':from': window.from,
+        ':to': window.to,
+        ':caller': 'reader@umccr.org',
+        ':outcome': 'answered',
+      },
+      ScanIndexForward: false,
+    });
+  });
+
+  test('reads on past short pages, and continues after the last entry it returned', async () => {
+    dynamodb
+      .on(QueryCommand)
+      .resolvesOnce({ Items: [item(15)], LastEvaluatedKey: { page: 1 } })
+      .resolvesOnce({ Items: [item(14), item(13)], LastEvaluatedKey: { page: 2 } });
+    const page = await store().list({ ...window, limit: 2 });
+    expect(page.items).toEqual([entry(15), entry(14)]);
+    expect(queries().map((query) => query.ExclusiveStartKey)).toEqual([undefined, { page: 1 }]);
+
+    dynamodb.reset();
+    dynamodb.on(QueryCommand).resolves({ Items: [item(13)] });
+    expect(await store().list({ ...window, limit: 2, cursor: page.cursor })).toEqual({
+      items: [entry(13)],
+    });
+    expect(queries()[0]!.ExclusiveStartKey).toEqual({
+      pk: item(14).pk,
+      sk: item(14).sk,
+      at: item(14).at,
+      auditPk: 'exchange',
+    });
+  });
+
+  test.each([
+    'not-a-cursor',
+    Buffer.from(JSON.stringify({ pk: 'spend', sk: 'month#2026-10', at: 'x' })).toString(
+      'base64url'
+    ),
+  ])('refuses a cursor it did not make: %s', async (cursor) => {
+    await expect(store().list({ ...window, limit: 2, cursor })).rejects.toMatchObject({
+      status: 400,
+      code: 'invalid-request',
+    });
+    expect(queries()).toHaveLength(0);
+  });
+
+  test('reads every entry in a window, every page', async () => {
+    dynamodb
+      .on(QueryCommand)
+      .resolvesOnce({ Items: [item(12)], LastEvaluatedKey: { page: 1 } })
+      .resolvesOnce({ Items: [item(11)] });
+    expect(await store().between(window.from, window.to)).toEqual([entry(12), entry(11)]);
+    expect(queries()[0]!.FilterExpression).toBeUndefined();
+  });
+
+  test("reads a conversation's exchanges from the table, oldest first, every page", async () => {
+    dynamodb
+      .on(QueryCommand)
+      .resolvesOnce({ Items: [item(11)], LastEvaluatedKey: { page: 1 } })
+      .resolvesOnce({ Items: [item(12)] });
+    expect(await store().conversation(conversation)).toEqual([entry(11), entry(12)]);
+    expect(queries()[0]).toEqual({
+      TableName: 'table',
+      KeyConditionExpression: 'pk = :pk',
+      ExpressionAttributeValues: { ':pk': `audit#${conversation}` },
+      ExclusiveStartKey: undefined,
     });
   });
 });

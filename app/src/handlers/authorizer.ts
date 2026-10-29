@@ -16,5 +16,11 @@ const verifier = CognitoJwtVerifier.create({
 
 export const handler = createAuthorizer(async (token) => {
   const payload = await verifier.verify(token);
-  return { sub: payload.sub, aud: String(payload.aud) };
+  const email = payload['email'];
+  return {
+    sub: payload.sub,
+    aud: String(payload.aud),
+    email: typeof email === 'string' ? email : undefined,
+    groups: payload['cognito:groups'] ?? [],
+  };
 });
