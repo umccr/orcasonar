@@ -6,16 +6,17 @@ import {
   QueryCommand,
   TransactWriteCommand,
 } from '@aws-sdk/lib-dynamodb';
-import { ApiError } from '../lib/errors';
+import { z } from 'zod';
+import { ApiError, invalidRequest } from '../lib/errors';
 import type { OverBudget, Spend, SpendKeys, SpendStore } from '../services/budget';
 import type { IngestState, StaleMark, StartedJob } from '../services/ingestion';
 import { HISTORY_TURNS } from '../services/prompt';
 import type { Turn } from '../services/prompt';
-import type { ConversationStore } from '../services/stores';
+import type { AuditEntry, AuditQuery, AuditStore, ConversationStore } from '../services/stores';
 
 /**
- * One table, keyed `pk`/`sk`, holds budget counters, conversation turns and the ingestion state. Items expire through
- * `expiresAt` (seconds since the epoch).
+ * One table, keyed `pk`/`sk`, holds budget counters, conversation turns, the audit log and the ingestion state. Items
+ * expire through `expiresAt` (seconds since the epoch).
  */
 
 const DAY = 24 * 60 * 60;
@@ -194,6 +195,164 @@ export class DynamoConversationStore implements ConversationStore {
         },
       })
     );
+  }
+}
+
+/** The index that lists the audit log by time: `auditPk`, the same for every entry, and `at`. */
+export const AUDIT_INDEX = 'audit-by-time';
+const AUDIT_PARTITION = 'exchange';
+
+/** Where a page of the audit log stopped: the last entry's keys in the table and in the index. */
+const AuditCursor = z.object({
+  pk: z.string().regex(/^audit#c_[0-9a-f]{32}$/),
+  sk: z.string().min(1).max(100),
+  at: z.string().min(1).max(40),
+});
+
+const cursorFor = (item: Record<string, unknown>) =>
+  Buffer.from(JSON.stringify({ pk: item['pk'], sk: item['sk'], at: item['at'] })).toString(
+    'base64url'
+  );
+
+const startAfter = (cursor: string) => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    parsed = undefined;
+  }
+  const keys = AuditCursor.safeParse(parsed);
+  if (!keys.success) {
+    throw invalidRequest('cursor must be one a previous page returned.');
+  }
+  return { ...keys.data, auditPk: AUDIT_PARTITION };
+};
+
+/** The table's own attributes on an audit item, which are not part of the entry. */
+const AUDIT_KEYS = new Set(['pk', 'sk', 'auditPk', 'expiresAt']);
+
+const toEntry = (item: Record<string, unknown>): AuditEntry =>
+  Object.fromEntries(
+    Object.entries(item).filter(([name]) => !AUDIT_KEYS.has(name))
+  ) as unknown as AuditEntry;
+
+/**
+ * The audit log: one item per exchange, `audit#<conversation>` and `<at>#<exchange>`, kept 30 days. The index lists
+ * them by time, and a caller or an outcome is filtered as the entries are read. That reads every entry in the window,
+ * which the budget keeps to about a hundred a day; an index by caller can follow if it ever grows.
+ */
+export class DynamoAuditStore implements AuditStore {
+  constructor(
+    private readonly client: DynamoDBDocumentClient,
+    private readonly tableName: string
+  ) {}
+
+  async put(entry: AuditEntry): Promise<void> {
+    await this.client.send(
+      new PutCommand({
+        TableName: this.tableName,
+        Item: {
+          pk: `audit#${entry.conversationId}`,
+          sk: `${entry.at}#${entry.exchangeId}`,
+          auditPk: AUDIT_PARTITION,
+          ...entry,
+          expiresAt: expiresIn(30 * DAY),
+        },
+      })
+    );
+  }
+
+  async list(query: AuditQuery): Promise<{ items: AuditEntry[]; cursor?: string }> {
+    const filters: string[] = [];
+    const names: Record<string, string> = {};
+    const values: Record<string, unknown> = {};
+    if (query.caller) {
+      filters.push('(#callerId = :caller OR #email = :caller)');
+      Object.assign(names, { '#callerId': 'callerId', '#email': 'email' });
+      values[':caller'] = query.caller;
+    }
+    if (query.outcome) {
+      filters.push('#outcome = :outcome');
+      names['#outcome'] = 'outcome';
+      values[':outcome'] = query.outcome;
+    }
+    const items: AuditEntry[] = [];
+    const pages = this.byTime(query.from, query.to, {
+      filter: filters.length ? filters.join(' AND ') : undefined,
+      names,
+      values,
+      startKey: query.cursor ? startAfter(query.cursor) : undefined,
+    });
+    // A filter can leave a page short, so pages are read until the limit is reached. The cursor is the last entry
+    // returned rather than the last read, since the page it came from may have more.
+    for await (const item of pages) {
+      items.push(toEntry(item));
+      if (items.length === query.limit) {
+        return { items, cursor: cursorFor(item) };
+      }
+    }
+    return { items };
+  }
+
+  async between(from: string, to: string): Promise<AuditEntry[]> {
+    const items: AuditEntry[] = [];
+    for await (const item of this.byTime(from, to, { names: {}, values: {} })) {
+      items.push(toEntry(item));
+    }
+    return items;
+  }
+
+  async conversation(conversationId: string): Promise<AuditEntry[]> {
+    const items: AuditEntry[] = [];
+    let startKey: Record<string, unknown> | undefined;
+    do {
+      const result = await this.client.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          KeyConditionExpression: 'pk = :pk',
+          ExpressionAttributeValues: { ':pk': `audit#${conversationId}` },
+          ExclusiveStartKey: startKey,
+        })
+      );
+      items.push(...(result.Items ?? []).map(toEntry));
+      startKey = result.LastEvaluatedKey;
+    } while (startKey);
+    return items;
+  }
+
+  /** The entries between two ISO times, newest first, a page of the index at a time. */
+  private async *byTime(
+    from: string,
+    to: string,
+    options: {
+      filter?: string;
+      names: Record<string, string>;
+      values: Record<string, unknown>;
+      startKey?: Record<string, unknown>;
+    }
+  ): AsyncGenerator<Record<string, unknown>> {
+    let startKey = options.startKey;
+    do {
+      const result = await this.client.send(
+        new QueryCommand({
+          TableName: this.tableName,
+          IndexName: AUDIT_INDEX,
+          KeyConditionExpression: '#auditPk = :partition AND #at BETWEEN :from AND :to',
+          FilterExpression: options.filter,
+          ExpressionAttributeNames: { '#auditPk': 'auditPk', '#at': 'at', ...options.names },
+          ExpressionAttributeValues: {
+            ':partition': AUDIT_PARTITION,
+            ':from': from,
+            ':to': to,
+            ...options.values,
+          },
+          ScanIndexForward: false,
+          ExclusiveStartKey: startKey,
+        })
+      );
+      yield* result.Items ?? [];
+      startKey = result.LastEvaluatedKey;
+    } while (startKey);
   }
 }
 

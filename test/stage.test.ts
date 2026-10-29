@@ -10,7 +10,7 @@ import {
   getOrcaSonarStatelessStackProps,
   OrcaSonarStage,
 } from '../infrastructure/stage/config';
-import { APP_ROOT, SSM_PARAMETERS } from '../infrastructure/stage/constants';
+import { APP_ROOT, AUDIT_INDEX, SSM_PARAMETERS } from '../infrastructure/stage/constants';
 import { OrcaSonarStatefulStack } from '../infrastructure/stage/stateful-stack';
 import { OrcaSonarStatelessStack } from '../infrastructure/stage/stateless-stack';
 import {
@@ -148,6 +148,22 @@ describe('stateful stack', () => {
     });
   });
 
+  // A table update can create one index at most, so a second needs a deploy of its own.
+  test('indexes the audit log by time, with one index only', () => {
+    template.hasResourceProperties('AWS::DynamoDB::Table', {
+      GlobalSecondaryIndexes: [
+        {
+          IndexName: AUDIT_INDEX,
+          KeySchema: [
+            { AttributeName: 'auditPk', KeyType: 'HASH' },
+            { AttributeName: 'at', KeyType: 'RANGE' },
+          ],
+          Projection: { ProjectionType: 'ALL' },
+        },
+      ],
+    });
+  });
+
   test('protects the table and keeps data in prod', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       DeletionProtectionEnabled: true,
@@ -258,7 +274,41 @@ describe('stateless stack', () => {
         });
       }
     }
-    expect(methods.filter((method) => method.integration.Type === 'AWS_PROXY')).toHaveLength(4);
+    expect(methods.filter((method) => method.integration.Type === 'AWS_PROXY')).toHaveLength(7);
+  });
+
+  test('serves the audit log from its own function, the only one that knows the audit group', () => {
+    const functions = Object.entries(resources).filter(
+      ([, resource]) => resource.Type === 'AWS::Lambda::Function'
+    );
+    const auditing = functions.filter(
+      ([, resource]) =>
+        (resource.Properties.Environment as { Variables?: Record<string, unknown> } | undefined)
+          ?.Variables?.['AUDIT_GROUP'] !== undefined
+    );
+    expect(auditing).toHaveLength(1);
+    const [auditId, audit] = auditing[0]!;
+    expect(audit.Properties.Environment).toMatchObject({ Variables: { AUDIT_GROUP: 'admin' } });
+
+    const routes = methods.filter((method) => method.route.startsWith('GET /api/v1/audit/'));
+    expect(routes.map((method) => method.route).sort()).toEqual([
+      'GET /api/v1/audit/conversations/{conversationId}',
+      'GET /api/v1/audit/exchanges',
+      'GET /api/v1/audit/usage',
+    ]);
+    for (const route of routes) {
+      expect(route.authorization).toBe('CUSTOM');
+      expect(JSON.stringify(route.integration)).toContain(auditId);
+    }
+  });
+
+  test('lets only the audit function query the audit index', () => {
+    const reading = Object.values(template.findResources('AWS::IAM::Policy')).filter((policy) =>
+      JSON.stringify(policy).includes(`/index/${AUDIT_INDEX}`)
+    );
+    expect(reading).toHaveLength(1);
+    expect(JSON.stringify(reading[0])).toContain('AuditFunctionServiceRole');
+    expect(JSON.stringify(reading[0])).toContain('dynamodb:Query');
   });
 
   test('answers /health with the stage, without a function', () => {

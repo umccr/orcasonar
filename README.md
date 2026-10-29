@@ -17,6 +17,7 @@ docs.umccr.org chat panel ──HTTPS──▶ AWS WAF ─▶ API Gateway REST A
                                                   │                                       ─▶ Claude on Bedrock, with the guardrail
                                                   │                                       ─▶ 30-day records (S3)
                                                   ├─ /search, /documents/{id}, /feedback ─▶ query Lambda
+                                                  ├─ /audit/* (admin group only) ─▶ audit Lambda ─▶ audit log (DynamoDB)
                                                   └─ /health, /schema/swagger-ui/, /schema/openapi.json ─▶ API Gateway itself:
                                                      no token and no Lambda
 

@@ -5,6 +5,7 @@ import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { ApiError, errorDetail, invalidRequest } from './lib/errors';
 import { newId } from './lib/ids';
+import { auditExchange, auditRow, auditWindow, usageByCaller } from './services/audit';
 import type { Budget } from './services/budget';
 import type { Caller, ChatDeps, ChatEvent, ChatRequest, ChatResult } from './services/chat';
 import { answerQuestion } from './services/chat';
@@ -21,6 +22,8 @@ export interface AppDeps extends Omit<ChatDeps, 'budget' | 'answerer'> {
   readonly documents: DocumentStore;
   /** Only the chat function has a model; the query function never builds one. */
   readonly answerer: () => ChatDeps['answerer'];
+  /** The Cognito group whose members may read the audit log; without one, no one may. */
+  readonly auditGroup?: string;
   /** Local development only: a caller to assume when no authorizer ran. */
   readonly devCaller?: Caller;
 }
@@ -35,17 +38,18 @@ export const ROUTES = [
   { method: 'post', path: '/search' },
   { method: 'get', path: '/documents/{id}' },
   { method: 'post', path: '/feedback' },
+  { method: 'get', path: '/audit/exchanges' },
+  { method: 'get', path: '/audit/conversations/{conversationId}' },
+  { method: 'get', path: '/audit/usage' },
 ] as const;
 
 const SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const Sites = z.array(z.string().regex(SLUG)).min(1).max(20).optional();
+const ConversationId = z.string().regex(/^c_[0-9a-f]{32}$/);
 
 const ChatBody = z.object({
   query: z.string().trim().min(1).max(MAX_QUESTION_CHARACTERS),
-  conversationId: z
-    .string()
-    .regex(/^c_[0-9a-f]{32}$/)
-    .optional(),
+  conversationId: ConversationId.optional(),
   sites: Sites,
   mode: z.enum(['ask']).default('ask'),
 });
@@ -62,11 +66,46 @@ const FeedbackBody = z.object({
   comment: z.string().trim().max(1000).optional(),
 });
 
+/** A UTC date, or an ISO time in UTC. */
+const Moment = z.union([z.iso.date(), z.iso.datetime()]).optional();
+
+const AuditListQuery = z.object({
+  from: Moment,
+  to: Moment,
+  caller: z
+    .string()
+    .trim()
+    .min(1)
+    .max(320)
+    .transform((caller) => caller.toLowerCase())
+    .optional(),
+  outcome: z.enum(['answered', 'not-covered', 'failed']).optional(),
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(2000).optional(),
+});
+
+const AuditUsageQuery = z.object({ from: Moment, to: Moment });
+
+/** A page of the audit log carries its window, so the next page reads the same one even when `to` defaulted to now. */
+const AuditCursor = z.object({ from: z.iso.datetime(), to: z.iso.datetime(), after: z.string() });
+
 type Env = {
   Bindings: {
     requestContext?: { authorizer?: Record<string, unknown> | null };
   };
   Variables: { caller: Caller };
+};
+
+/** The value as the schema reads it; its first problem is a `400 invalid-request`. */
+const validated = <T>(schema: z.ZodType<T>, value: unknown, name: string): T => {
+  const result = schema.safeParse(value);
+  if (!result.success) {
+    const issue = result.error.issues[0];
+    throw invalidRequest(
+      issue ? `${issue.path.join('.') || name}: ${issue.message}` : 'Invalid request.'
+    );
+  }
+  return result.data;
 };
 
 const parseBody = async <T>(c: Context<Env>, schema: z.ZodType<T>): Promise<T> => {
@@ -76,12 +115,22 @@ const parseBody = async <T>(c: Context<Env>, schema: z.ZodType<T>): Promise<T> =
   } catch {
     throw invalidRequest('The request body must be JSON.');
   }
-  const result = schema.safeParse(body);
+  return validated(schema, body, 'body');
+};
+
+const auditCursor = (window: { from: string; to: string }, after: string) =>
+  Buffer.from(JSON.stringify({ ...window, after })).toString('base64url');
+
+const fromAuditCursor = (cursor: string) => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    parsed = undefined;
+  }
+  const result = AuditCursor.safeParse(parsed);
   if (!result.success) {
-    const issue = result.error.issues[0];
-    throw invalidRequest(
-      issue ? `${issue.path.join('.') || 'body'}: ${issue.message}` : 'Invalid request.'
-    );
+    throw invalidRequest('cursor must be one a previous page returned.');
   }
   return result.data;
 };
@@ -91,8 +140,15 @@ const callerFrom = (c: Context<Env>, devCaller?: Caller): Caller => {
   const context = c.env?.requestContext?.authorizer;
   const id = context?.['sub'];
   const clientId = context?.['clientId'];
+  const email = context?.['email'];
+  const groups = context?.['groups'];
   if (typeof id === 'string' && id && typeof clientId === 'string') {
-    return { id, clientId };
+    return {
+      id,
+      clientId,
+      ...(typeof email === 'string' && email ? { email: email.toLowerCase() } : {}),
+      groups: typeof groups === 'string' ? groups.split(' ').filter(Boolean) : [],
+    };
   }
   if (devCaller) {
     return devCaller;
@@ -127,9 +183,14 @@ export const createApp = (deps: AppDeps) => {
 
   /**
    * A failed answer as the client sees it, streamed or not: an ApiError as it is, and anything else, such as Bedrock
-   * refusing or throttling, as `503 unavailable`. What failed is logged, without the question.
+   * refusing or throttling, as `503 unavailable`. What failed is logged, without the question, and the exchange goes
+   * in the audit log with its code. An audit entry that cannot be saved is logged, and changes nothing for the client.
    */
-  const answerFailure = (error: unknown, request: ChatRequest, outcome: string): ApiError => {
+  const answerFailure = async (
+    error: unknown,
+    request: ChatRequest,
+    outcome: string
+  ): Promise<ApiError> => {
     const failure =
       error instanceof ApiError
         ? error
@@ -140,7 +201,40 @@ export const createApp = (deps: AppDeps) => {
       code: failure.code,
       ...(error instanceof ApiError ? {} : errorDetail(error, [request.question])),
     });
+    try {
+      await deps.audit.put({
+        exchangeId: request.exchangeId,
+        conversationId: request.conversationId,
+        at: deps.clock().toISOString(),
+        callerId: request.caller.id,
+        email: request.caller.email,
+        clientId: request.caller.clientId,
+        question: request.question,
+        sites: request.sites,
+        outcome: 'failed',
+        errorCode: failure.code,
+      });
+    } catch (saving) {
+      deps.log({
+        outcome: 'write-error',
+        write: 'audit',
+        exchangeId: request.exchangeId,
+        ...errorDetail(saving, [request.question]),
+      });
+    }
     return failure;
+  };
+
+  /**
+   * The audit log holds everyone's questions with their emails, so only members of the audit group may read it. Each
+   * read is logged with who read it, and never with what it returned.
+   */
+  const auditorFrom = (c: Context<Env>): Caller => {
+    const caller = callerFrom(c, deps.devCaller);
+    if (!deps.auditGroup || !caller.groups?.includes(deps.auditGroup)) {
+      throw new ApiError(403, 'forbidden', 'Only OrcaSonar administrators can read the audit log.');
+    }
+    return caller;
   };
 
   app.post('/chat', async (c) => {
@@ -171,7 +265,7 @@ export const createApp = (deps: AppDeps) => {
             stream.writeSSE({ event: event.event, data: JSON.stringify(event.data) })
           );
         } catch (error) {
-          const failure = answerFailure(error, request, 'stream-error');
+          const failure = await answerFailure(error, request, 'stream-error');
           // The reader may have gone; there is then no one to tell.
           await stream
             .writeSSE({
@@ -187,7 +281,7 @@ export const createApp = (deps: AppDeps) => {
     try {
       result = await answerQuestion(chat, request, async () => undefined);
     } catch (error) {
-      throw answerFailure(error, request, 'answer-error');
+      throw await answerFailure(error, request, 'answer-error');
     }
     return c.json({
       exchangeId: request.exchangeId,
@@ -233,6 +327,63 @@ export const createApp = (deps: AppDeps) => {
       comment: body.comment,
     });
     return c.body(null, 204);
+  });
+
+  app.get('/audit/exchanges', async (c) => {
+    const viewer = auditorFrom(c);
+    const query = validated(AuditListQuery, c.req.query(), 'query');
+    const cursor = query.cursor === undefined ? undefined : fromAuditCursor(query.cursor);
+    const window = cursor
+      ? { from: cursor.from, to: cursor.to }
+      : auditWindow(query.from, query.to, deps.clock());
+    const page = await deps.audit.list({
+      ...window,
+      caller: query.caller,
+      outcome: query.outcome,
+      limit: query.limit,
+      cursor: cursor?.after,
+    });
+    deps.log({
+      outcome: 'audit-read',
+      viewer: viewer.id,
+      route: 'exchanges',
+      filtered: query.caller !== undefined || query.outcome !== undefined,
+      count: page.items.length,
+    });
+    return c.json({
+      ...window,
+      items: page.items.map(auditRow),
+      nextCursor: page.cursor === undefined ? undefined : auditCursor(window, page.cursor),
+    });
+  });
+
+  app.get('/audit/conversations/:conversationId', async (c) => {
+    const viewer = auditorFrom(c);
+    const conversationId = validated(
+      ConversationId,
+      c.req.param('conversationId'),
+      'conversationId'
+    );
+    const entries = await deps.audit.conversation(conversationId);
+    deps.log({
+      outcome: 'audit-read',
+      viewer: viewer.id,
+      route: 'conversation',
+      count: entries.length,
+    });
+    if (entries.length === 0) {
+      throw new ApiError(404, 'not-found', 'The audit log has no such conversation.');
+    }
+    return c.json({ conversationId, exchanges: entries.map(auditExchange) });
+  });
+
+  app.get('/audit/usage', async (c) => {
+    const viewer = auditorFrom(c);
+    const query = validated(AuditUsageQuery, c.req.query(), 'query');
+    const window = auditWindow(query.from, query.to, deps.clock());
+    const entries = await deps.audit.between(window.from, window.to);
+    deps.log({ outcome: 'audit-read', viewer: viewer.id, route: 'usage', count: entries.length });
+    return c.json({ ...window, ...usageByCaller(entries) });
   });
 
   return app;

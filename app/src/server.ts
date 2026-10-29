@@ -4,17 +4,24 @@ import { fakeDeps } from './testing/fakes';
 
 /**
  * `pnpm dev`: the API on http://127.0.0.1:8787/api/v1 with in-memory stores, sample passages and a scripted answer,
- * so the chat panel and the stream can be developed without AWS. Every request runs as a fixed local caller.
+ * so the chat panel and the stream can be developed without AWS. Every request runs as a fixed local caller, who is in
+ * the audit group too.
  *
  *   curl -N -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
  *     -d '{"query":"How do I add a site?"}' http://127.0.0.1:8787/api/v1/chat
+ *   curl http://127.0.0.1:8787/api/v1/audit/exchanges
  */
 const deps = fakeDeps({ now: undefined });
 const app = createApp({
   ...deps,
   clock: () => new Date(),
   corsAllowOrigins: ['http://127.0.0.1:8000', 'http://localhost:8000'],
-  devCaller: { id: 'local-reader', clientId: 'local' },
+  devCaller: {
+    id: 'local-reader',
+    clientId: 'local',
+    email: 'local-reader@example.org',
+    groups: [deps.auditGroup ?? 'admin'],
+  },
   log: (entry) => console.log(JSON.stringify(entry)),
 });
 

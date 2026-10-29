@@ -31,13 +31,13 @@ for personal data about patients, and its grounding check flags answers the pass
 
 ## Release 1, and what comes later
 
-|             | Release 1                                                                           | Later, each when someone needs it                                                                                        |
-| ----------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Callers     | the docs chat panel: ID tokens from the `docs-app` Cognito client                   | portal apps; a machine client, and AgentCore Gateway to offer the API to AI agents as MCP tools                          |
-| Sources     | the UMCCR documentation docs.umccr.org exports, in one data source, `docs`          | OrcaBus API docs, OrcaHouse schemas or tables, OrcaBus APIs: each its own data source or tool, with its own access rules |
-| Modes       | Ask, which answers with Claude, and Search, which returns passages without a model  | Plan: Claude Sonnet 5 with agentic retrieval, at about three times the cost of Ask                                       |
-| Endpoints   | `/chat`, `/search`, `/documents/{id}`, `/feedback`; `/health` and the API docs open | `/sources`, what is indexed and when it was synced; `/usage`, the caller's allowance left today                          |
-| Watching it | alarms on one alerts topic per stage, and the AWS Budgets backstop                  | a Synthetics canary, and a deeper one once a machine client can call `/chat`                                             |
+|             | Release 1                                                                                                           | Later, each when someone needs it                                                                                        |
+| ----------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| Callers     | the docs chat panel: ID tokens from the `docs-app` Cognito client                                                   | portal apps; a machine client, and AgentCore Gateway to offer the API to AI agents as MCP tools                          |
+| Sources     | the UMCCR documentation docs.umccr.org exports, in one data source, `docs`                                          | OrcaBus API docs, OrcaHouse schemas or tables, OrcaBus APIs: each its own data source or tool, with its own access rules |
+| Modes       | Ask, which answers with Claude, and Search, which returns passages without a model                                  | Plan: Claude Sonnet 5 with agentic retrieval, at about three times the cost of Ask                                       |
+| Endpoints   | `/chat`, `/search`, `/documents/{id}`, `/feedback`; `/audit/*` for the audit group; `/health` and the API docs open | `/sources`, what is indexed and when it was synced; `/usage`, the caller's allowance left today                          |
+| Watching it | alarms on one alerts topic per stage, and the AWS Budgets backstop                                                  | a Synthetics canary, and a deeper one once a machine client can call `/chat`                                             |
 
 ## Where it fits
 
@@ -70,8 +70,9 @@ Every change keeps to these. [design.md](design.md) has the reasons.
    per day and a cap of $0.40 a day per caller share the budget out, limits per request keep any one answer under
    about 8 cents, and AWS Budgets is the backstop. Search keeps working when the allowance is spent.
 5. **Questions are kept 30 days, and never logged.** Each exchange is recorded for evaluation, then deleted after 30
-   days. Logs hold the caller's Cognito `sub` and the outcome, never the question or the answer. The evaluation set
-   keeps examples without reader IDs.
+   days. Logs hold the caller's Cognito `sub` and the outcome, never the question, the answer or the email. The audit
+   log keeps the same 30 days with the reader's email, for the audit group only. The evaluation set keeps examples
+   without reader IDs.
 6. **The data outlives the API.** The stateful stack holds the key, the buckets, the table, the knowledge base and the
    guardrail. The stateless stack holds everything that changes often, and can be replaced without touching the data
    or the index.

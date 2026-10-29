@@ -3,10 +3,21 @@ import { errorDetail } from './lib/errors';
 import type { AnswerEvent } from './services/answer';
 import { ANSWER_HOLD_USD, spendKeys } from './services/budget';
 import { RETRIEVAL_USD } from './services/pricing';
+import type { AuditEntry } from './services/stores';
 import type { FakeDeps } from './testing/fakes';
 import { fakeDeps, ScriptedAnswerer } from './testing/fakes';
 
 const READER = { requestContext: { authorizer: { sub: 'reader-1', clientId: 'docs-app' } } };
+const ADMIN = {
+  requestContext: {
+    authorizer: {
+      sub: 'admin-1',
+      clientId: 'docs-app',
+      email: 'Admin@UMCCR.org',
+      groups: 'bioinfo admin',
+    },
+  },
+};
 const ORIGIN = 'https://docs.dev.umccr.org';
 
 const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
@@ -484,6 +495,346 @@ describe('other routes', () => {
     const response = await app.request(get('/nothing'), undefined, READER);
     expect(response.status).toBe(404);
     expect(await response.json()).toMatchObject({ error: { code: 'not-found' } });
+  });
+});
+
+describe('audit log, written', () => {
+  const ASKER = {
+    requestContext: {
+      authorizer: { sub: 'reader-1', clientId: 'docs-app', email: 'Reader@UMCCR.org', groups: '' },
+    },
+  };
+
+  test("keeps each answer with the reader's email, and logs neither", async () => {
+    const { app, deps } = setup();
+    const response = await app.request(
+      post('/chat', { query: 'How do I add a site?' }, { Accept: 'text/event-stream' }),
+      undefined,
+      ASKER
+    );
+    await response.text();
+    expect(deps.auditStore.entries).toHaveLength(1);
+    const [entry] = deps.auditStore.entries;
+    const record = deps.recordStore.exchanges[0]!;
+    expect(entry).toMatchObject({
+      exchangeId: record.exchangeId,
+      conversationId: record.conversationId,
+      at: record.at,
+      callerId: 'reader-1',
+      email: 'reader@umccr.org',
+      clientId: 'docs-app',
+      outcome: 'answered',
+      question: 'How do I add a site?',
+      answer: record.answer,
+      sources: record.sources,
+      costUsd: record.costUsd,
+    });
+    expect(entry).not.toHaveProperty('stage');
+    expect(JSON.stringify(deps.logs)).not.toContain('umccr.org');
+    expect(JSON.stringify(deps.logs)).not.toContain('add a site');
+  });
+
+  test('keeps a question the documentation does not cover', async () => {
+    const { app, deps } = setup({ passages: [] });
+    await app.request(post('/chat', { query: 'What is for lunch?' }), undefined, ASKER);
+    expect(deps.auditStore.entries[0]).toMatchObject({
+      outcome: 'not-covered',
+      modelId: undefined,
+    });
+  });
+
+  test('keeps a failed answer with its code, streamed or not', async () => {
+    const { app, deps } = setup({ answerer: new BrokenAnswerer() });
+    const streamed = await app.request(
+      post('/chat', { query: 'How do I add a site?' }, { Accept: 'text/event-stream' }),
+      undefined,
+      ASKER
+    );
+    await streamed.text();
+    deps.scriptedAnswerer.stream = new RefusedAnswerer().stream;
+    await app.request(post('/chat', { query: 'And publish it?' }), undefined, ASKER);
+    expect(deps.auditStore.entries).toEqual([
+      expect.objectContaining({
+        outcome: 'failed',
+        errorCode: 'unavailable',
+        question: 'How do I add a site?',
+        email: 'reader@umccr.org',
+      }),
+      expect.objectContaining({ outcome: 'failed', question: 'And publish it?' }),
+    ]);
+    expect(deps.auditStore.entries[0]).not.toHaveProperty('answer');
+  });
+
+  test('answers as it would when the audit entry cannot be saved, and logs that', async () => {
+    const { app, deps } = setup({ answerer: new RefusedAnswerer() });
+    deps.auditStore.put = async (entry) => {
+      throw new Error(`Cannot write "${entry.question}"`);
+    };
+    const failed = await app.request(
+      post('/chat', { query: 'How do I add a site?' }),
+      undefined,
+      ASKER
+    );
+    expect(failed.status).toBe(503);
+
+    const answered = setup();
+    answered.deps.auditStore.put = deps.auditStore.put;
+    const stream = await events(
+      await answered.app.request(
+        post('/chat', { query: 'How do I add a site?' }, { Accept: 'text/event-stream' }),
+        undefined,
+        ASKER
+      )
+    );
+    expect(stream.at(-1)).toMatchObject({ event: 'done' });
+    for (const logs of [deps.logs, answered.deps.logs]) {
+      expect(logs).toContainEqual(
+        expect.objectContaining({ outcome: 'write-error', write: 'audit' })
+      );
+      expect(JSON.stringify(logs)).not.toContain('add a site');
+    }
+  });
+});
+
+describe('audit log, read', () => {
+  const conversation = `c_${'a'.repeat(32)}`;
+  let next = 0;
+  const entry = (fields: Partial<AuditEntry> & Pick<AuditEntry, 'at'>): AuditEntry => ({
+    exchangeId: `x_${String((next += 1)).padStart(32, '0')}`,
+    conversationId: conversation,
+    callerId: 'reader-1',
+    email: 'reader@umccr.org',
+    clientId: 'docs-app',
+    outcome: 'answered',
+    question: 'How do I add a site?',
+    answer: 'Add one entry to the site registry [1]. '.repeat(10),
+    sources: [
+      { id: 'platform:onboarding', url: 'https://docs.umccr.org/platform/onboarding/', score: 0.9 },
+    ],
+    modelId: 'au.anthropic.claude-sonnet-5',
+    usage: { inputTokens: 5000, outputTokens: 400 },
+    costUsd: 0.02,
+    guardrail: 'none',
+    latencyMs: 4000,
+    ...fields,
+  });
+
+  /** Three in the default week before the fake clock's 2026-10-12T03:00Z, and one long before it. */
+  const seeded = () => {
+    const { app, deps } = setup();
+    deps.auditStore.entries.push(
+      entry({ at: '2026-10-10T01:00:00.000Z' }),
+      entry({
+        at: '2026-10-11T01:00:00.000Z',
+        conversationId: `c_${'b'.repeat(32)}`,
+        callerId: 'reader-2',
+        email: 'other@umccr.org',
+        outcome: 'not-covered',
+        answer: 'The documentation does not cover that.',
+        sources: [],
+        modelId: undefined,
+        usage: undefined,
+        costUsd: 0.001,
+      }),
+      entry({
+        at: '2026-10-11T02:00:00.000Z',
+        outcome: 'failed',
+        errorCode: 'unavailable',
+        question: 'And publish it?',
+        answer: undefined,
+        sources: undefined,
+        modelId: undefined,
+        usage: undefined,
+        costUsd: undefined,
+        guardrail: undefined,
+        latencyMs: undefined,
+      }),
+      entry({ at: '2026-09-01T00:00:00.000Z' })
+    );
+    return { app, deps };
+  };
+
+  test.each(['/audit/exchanges', `/audit/conversations/${conversation}`, '/audit/usage'])(
+    '%s is for the audit group only',
+    async (path) => {
+      const { app, deps } = seeded();
+      const reader = await app.request(get(path), undefined, READER);
+      expect(reader.status).toBe(403);
+      expect(await reader.json()).toMatchObject({ error: { code: 'forbidden' } });
+
+      const unconfigured = createApp({ ...deps, auditGroup: undefined });
+      expect((await unconfigured.request(get(path), undefined, ADMIN)).status).toBe(403);
+      expect((await app.request(get(path), undefined, ADMIN)).status).toBe(200);
+    }
+  );
+
+  test('lists the last week newest first, with the question and the start of the answer', async () => {
+    const { app, deps } = seeded();
+    const response = await app.request(get('/audit/exchanges'), undefined, ADMIN);
+    const body = (await response.json()) as {
+      from: string;
+      to: string;
+      items: Array<Record<string, unknown>>;
+      nextCursor?: string;
+    };
+    expect(body.from).toBe('2026-10-05T03:00:00.000Z');
+    expect(body.to).toBe('2026-10-12T03:00:00.000Z');
+    expect(body.items.map((item) => item.at)).toEqual([
+      '2026-10-11T02:00:00.000Z',
+      '2026-10-11T01:00:00.000Z',
+      '2026-10-10T01:00:00.000Z',
+    ]);
+    expect(body.nextCursor).toBeUndefined();
+    const answered = body.items[2]!;
+    expect(answered).toMatchObject({
+      caller: { id: 'reader-1', email: 'reader@umccr.org', clientId: 'docs-app' },
+      outcome: 'answered',
+      question: 'How do I add a site?',
+      citations: 1,
+      costUsd: 0.02,
+    });
+    expect(answered.answerPreview).toHaveLength(280);
+    expect(answered.answerPreview).toMatch(/…$/);
+    expect(body.items[0]).toMatchObject({ outcome: 'failed', errorCode: 'unavailable' });
+    expect(body.items[0]).not.toHaveProperty('answerPreview');
+    expect(deps.logs).toContainEqual({
+      outcome: 'audit-read',
+      viewer: 'admin-1',
+      route: 'exchanges',
+      filtered: false,
+      count: 3,
+    });
+    expect(JSON.stringify(deps.logs)).not.toContain('add a site');
+  });
+
+  test('filters by caller, by sub or by email in any case, and by outcome', async () => {
+    const { app } = seeded();
+    const ats = async (query: string) =>
+      (
+        (await (await app.request(get(`/audit/exchanges?${query}`), undefined, ADMIN)).json()) as {
+          items: Array<{ at: string }>;
+        }
+      ).items.map((item) => item.at);
+    expect(await ats('caller=reader-2')).toEqual(['2026-10-11T01:00:00.000Z']);
+    expect(await ats('caller=Reader%40UMCCR.org')).toEqual([
+      '2026-10-11T02:00:00.000Z',
+      '2026-10-10T01:00:00.000Z',
+    ]);
+    expect(await ats('caller=reader%40umccr.org&outcome=answered')).toEqual([
+      '2026-10-10T01:00:00.000Z',
+    ]);
+    expect(await ats('from=2026-09-01&to=2026-09-01')).toEqual(['2026-09-01T00:00:00.000Z']);
+  });
+
+  test('pages through with the cursor, which keeps the window', async () => {
+    const { app, deps } = seeded();
+    // A week later, a default window would hold none of these; the cursor's window has not moved.
+    const later = createApp({ ...deps, clock: () => new Date('2026-10-20T00:00:00Z') });
+    const page = async (query: string, from = app) =>
+      (await (await from.request(get(`/audit/exchanges?${query}`), undefined, ADMIN)).json()) as {
+        from: string;
+        items: Array<{ at: string }>;
+        nextCursor?: string;
+      };
+    const first = await page('limit=2&from=2026-09-15');
+    expect(first.items.map((item) => item.at)).toEqual([
+      '2026-10-11T02:00:00.000Z',
+      '2026-10-11T01:00:00.000Z',
+    ]);
+    expect(first.nextCursor).toEqual(expect.any(String));
+    const second = await page(`limit=2&cursor=${first.nextCursor}`, later);
+    expect(second.from).toBe(first.from);
+    expect(second.items.map((item) => item.at)).toEqual(['2026-10-10T01:00:00.000Z']);
+    expect(second.nextCursor).toBeUndefined();
+  });
+
+  test.each([
+    ['from=2026-10-12&to=2026-10-01', 'from must not be after to.'],
+    ['from=2026-08-01&to=2026-10-01', 'from and to can be at most 31 days apart.'],
+    ['from=yesterday', 'from'],
+    ['limit=500', 'limit'],
+    ['outcome=refused', 'outcome'],
+    ['cursor=not-a-cursor', 'cursor must be one a previous page returned.'],
+  ])('refuses %s', async (query, message) => {
+    const { app } = seeded();
+    const response = await app.request(get(`/audit/exchanges?${query}`), undefined, ADMIN);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: 'invalid-request', message: expect.stringContaining(message) },
+    });
+  });
+
+  test('shows a whole conversation, oldest first, with full answers and sources', async () => {
+    const { app } = seeded();
+    const response = await app.request(
+      get(`/audit/conversations/${conversation}`),
+      undefined,
+      ADMIN
+    );
+    const body = (await response.json()) as {
+      conversationId: string;
+      exchanges: Array<Record<string, unknown>>;
+    };
+    expect(body.conversationId).toBe(conversation);
+    expect(body.exchanges.map((exchange) => exchange.at)).toEqual([
+      '2026-09-01T00:00:00.000Z',
+      '2026-10-10T01:00:00.000Z',
+      '2026-10-11T02:00:00.000Z',
+    ]);
+    expect(body.exchanges[1]).toMatchObject({
+      caller: { id: 'reader-1', email: 'reader@umccr.org' },
+      answer: 'Add one entry to the site registry [1]. '.repeat(10),
+      sources: [{ id: 'platform:onboarding' }],
+      usage: { inputTokens: 5000, outputTokens: 400 },
+    });
+  });
+
+  test('404 for a conversation it does not hold, 400 for one that is not an ID', async () => {
+    const { app } = seeded();
+    const missing = await app.request(
+      get(`/audit/conversations/c_${'f'.repeat(32)}`),
+      undefined,
+      ADMIN
+    );
+    expect(missing.status).toBe(404);
+    const bad = await app.request(get('/audit/conversations/nope'), undefined, ADMIN);
+    expect(bad.status).toBe(400);
+  });
+
+  test('sums questions and spend per reader, most questions first', async () => {
+    const { app } = seeded();
+    const response = await app.request(get('/audit/usage'), undefined, ADMIN);
+    expect(await response.json()).toEqual({
+      from: '2026-10-05T03:00:00.000Z',
+      to: '2026-10-12T03:00:00.000Z',
+      totals: { people: 2, questions: 3, costUsd: 0.021 },
+      callers: [
+        {
+          id: 'reader-1',
+          email: 'reader@umccr.org',
+          questions: 2,
+          answered: 1,
+          notCovered: 0,
+          failed: 1,
+          costUsd: 0.02,
+          inputTokens: 5000,
+          outputTokens: 400,
+          lastAt: '2026-10-11T02:00:00.000Z',
+        },
+        {
+          id: 'reader-2',
+          email: 'other@umccr.org',
+          questions: 1,
+          answered: 0,
+          notCovered: 1,
+          failed: 0,
+          costUsd: 0.001,
+          inputTokens: 0,
+          outputTokens: 0,
+          lastAt: '2026-10-11T01:00:00.000Z',
+        },
+      ],
+    });
   });
 });
 

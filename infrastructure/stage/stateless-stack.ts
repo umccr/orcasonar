@@ -63,6 +63,7 @@ import {
   API_BASE_PATH,
   API_DOMAIN_PREFIX,
   APP_ROOT,
+  AUDIT_INDEX,
   DOCS_PREFIX,
   REPO_ROOT,
   SSM_PARAMETERS,
@@ -94,6 +95,8 @@ export interface OrcaSonarStatelessStackProps extends StackProps {
   readonly logRetention: RetentionDays;
   /** Addresses that hear the alarms and the budget's notices by email; each confirms its subscription once. */
   readonly alertEmails: string[];
+  /** The Cognito group whose members may read the audit log. */
+  readonly auditGroup: string;
 }
 
 const NODE_RUNTIME = Runtime.NODEJS_24_X;
@@ -201,6 +204,7 @@ const staticGet = (
  *   POST /api/v1/search         query Lambda
  *   GET  /api/v1/documents/{id} query Lambda
  *   POST /api/v1/feedback       query Lambda
+ *   GET  /api/v1/audit/…        audit Lambda: the audit log, for members of the audit group only
  *   GET  /api/v1/health         API Gateway itself, no token
  *   GET  /schema/swagger-ui/    API Gateway itself, no token: the API's documentation
  *   GET  /schema/openapi.json   API Gateway itself, no token: the OpenAPI contract
@@ -301,6 +305,21 @@ export class OrcaSonarStatelessStack extends Stack {
       new PolicyStatement({ actions: ['bedrock:Retrieve'], resources: [knowledgeBaseArn] })
     );
 
+    // The audit log: everyone's questions and answers, for the audit group, which only this function knows. It reads
+    // the table and its audit index, which the grants of a table imported by name do not cover, and nothing else.
+    const audit = this.function('AuditFunction', 'audit.ts', props, {
+      timeout: Duration.seconds(29),
+      memorySize: 512,
+      environment: { ...common, AUDIT_GROUP: props.auditGroup },
+    });
+    table.grantReadData(audit);
+    audit.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [`${table.tableArn}/index/${AUDIT_INDEX}`],
+      })
+    );
+
     const authorizerFunction = this.function('AuthorizerFunction', 'authorizer.ts', props, {
       timeout: Duration.seconds(10),
       memorySize: 256,
@@ -311,11 +330,11 @@ export class OrcaSonarStatelessStack extends Stack {
     });
 
     const alerts = this.alertsTopic(props);
-    const api = this.api(props, { chat, query, authorizerFunction, domainName });
+    const api = this.api(props, { chat, query, audit, authorizerFunction, domainName });
     this.firewall(api);
     this.ingestion(props, { table, ingestBucket, knowledgeBaseArn, knowledgeBaseId });
     this.budget(props, chat.role as Role, alerts);
-    this.alarms(api, { chat, query });
+    this.alarms(api, { chat, query, audit });
 
     // Every alarm tells the alerts topic when it fires and when it clears.
     const notify = new SnsAction(alerts);
@@ -381,6 +400,7 @@ export class OrcaSonarStatelessStack extends Stack {
     parts: {
       chat: NodejsFunction;
       query: NodejsFunction;
+      audit: NodejsFunction;
       authorizerFunction: NodejsFunction;
       domainName: string;
     }
@@ -457,6 +477,14 @@ export class OrcaSonarStatelessStack extends Stack {
     base.addResource('search').addMethod('POST', query, secured);
     base.addResource('documents').addResource('{id}').addMethod('GET', query, secured);
     base.addResource('feedback').addMethod('POST', query, secured);
+    const audit = new LambdaIntegration(parts.audit, { proxy: true });
+    const auditBase = base.addResource('audit');
+    auditBase.addResource('exchanges').addMethod('GET', audit, secured);
+    auditBase
+      .addResource('conversations')
+      .addResource('{conversationId}')
+      .addMethod('GET', audit, secured);
+    auditBase.addResource('usage').addMethod('GET', audit, secured);
 
     // The open routes never reach a function, so nothing without a token can run code that reads data or calls Bedrock.
     const health = { status: 'ok', version: resolveGitCommitId(), stage: props.stageSlug };
@@ -573,8 +601,15 @@ export class OrcaSonarStatelessStack extends Stack {
    * errors count only crashes and timeouts. Failed answers are counted from the outcomes the chat function logs, and
    * failed searches, documents and feedback from the API's 5XX responses.
    */
-  private alarms(api: RestApi, fns: { chat: NodejsFunction; query: NodejsFunction }): void {
-    for (const [name, fn] of Object.entries({ Chat: fns.chat, Query: fns.query })) {
+  private alarms(
+    api: RestApi,
+    fns: { chat: NodejsFunction; query: NodejsFunction; audit: NodejsFunction }
+  ): void {
+    for (const [name, fn] of Object.entries({
+      Chat: fns.chat,
+      Query: fns.query,
+      Audit: fns.audit,
+    })) {
       new Alarm(this, `${name}ErrorsAlarm`, {
         alarmDescription: `OrcaSonar ${name.toLowerCase()} Lambda errors: crashes and timeouts`,
         metric: fn.metricErrors({ period: Duration.minutes(5) }),
@@ -612,7 +647,7 @@ export class OrcaSonarStatelessStack extends Stack {
 
     new Alarm(this, 'ApiServerErrorsAlarm', {
       alarmDescription:
-        'OrcaSonar API 5XX responses: searches, documents or feedback that failed, ' +
+        'OrcaSonar API 5XX responses: searches, documents, feedback or audit reads that failed, ' +
         'or answers that failed before they started streaming',
       metric: api.metricServerError({ period: Duration.minutes(15), statistic: Stats.SUM }),
       threshold: 3,

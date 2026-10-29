@@ -17,6 +17,8 @@ const schema = z.object({
   CALLER_DAILY_USD: z.coerce.number().positive().default(0.4),
   MIN_SCORE: z.coerce.number().min(0).default(0),
   CORS_ALLOW_ORIGINS: z.string().default(''),
+  /** The Cognito group whose members may read the audit log; only the audit function has it. */
+  AUDIT_GROUP: z.string().min(1).optional(),
 });
 
 export type Env = z.infer<typeof schema>;

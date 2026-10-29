@@ -44,6 +44,12 @@ const ACCESS_LOGS: Record<OrcaSonarStage, boolean> = { BETA: true, PROD: true };
  */
 const ALERT_EMAILS: Record<OrcaSonarStage, string[]> = { BETA: [], PROD: [] };
 
+/**
+ * The data-portal Cognito group whose members may read the audit log: everyone's questions, with their emails. The
+ * portal's administrators for now; a group of OrcaSonar's own can replace it here, with no change to the code.
+ */
+const AUDIT_GROUP = 'admin';
+
 export const getOrcaSonarStatefulStackProps = (
   stage: OrcaSonarStage
 ): OrcaSonarStatefulStackProps => {
@@ -71,4 +77,5 @@ export const getOrcaSonarStatelessStackProps = (
   accessLogs: ACCESS_LOGS[stage],
   logRetention: stage === 'PROD' ? RetentionDays.THREE_MONTHS : RetentionDays.ONE_MONTH,
   alertEmails: ALERT_EMAILS[stage],
+  auditGroup: AUDIT_GROUP,
 });

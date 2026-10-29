@@ -598,6 +598,8 @@ Before calling a stage done:
 - [ ] Each exchange writes a record under `records/date=YYYY-MM-DD/`; the logs hold the caller's `sub` and the
       outcome, never the question or the answer.
 - [ ] Thumbs up or down on an answer writes under `feedback/`.
+- [ ] `/api/v1/audit/exchanges` lists the answer with the reader's email for a member of the `admin` group, and
+      answers `403` to anyone else.
 - [ ] The alarms exist and are `OK`:
       `aws cloudwatch describe-alarms --alarm-name-prefix UMCCR-OrcaSonar --query 'MetricAlarms[].[AlarmName, StateValue]'`
       in the stage account.
