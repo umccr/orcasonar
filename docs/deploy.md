@@ -3,7 +3,7 @@
 Every step to deploy OrcaSonar: the prerequisites in each stage account, the two pipelines in the toolchain account,
 and connecting docs.umccr.org. Operating it afterwards is in the [runbook](runbook.md). docs.umccr.org is deployed
 from `umccr/docs-platform`; its guide is
-[docs/deploy.md](https://github.com/umccr/docs-platform/blob/main/docs/deploy.md) there.
+[docs/site/deploy.md](https://github.com/umccr/docs-platform/blob/main/docs/site/deploy.md) there.
 
 > The commands below print account IDs, ARNs, bucket names and tokens. Keep them in your terminal or a private
 > note: never paste them into this repository, a pull request or an issue.
@@ -501,7 +501,7 @@ the ingest bucket. A release before that publishes the pages only, and its log w
 `/orcasonar/ingest-bucket-name` does not exist. Every 15 minutes, if anything changed, one ingestion job indexes the
 documents. To fill the index straight away, release each site once more: push a change under the site's docs paths,
 or start a release by hand
-([docs-platform runbook](https://github.com/umccr/docs-platform/blob/main/docs/operating/runbooks.md#start-a-release-by-hand)).
+([docs-platform runbook](https://github.com/umccr/docs-platform/blob/main/docs/site/runbook.md#start-a-release-by-hand)).
 Then, with dev credentials:
 
 ```sh

@@ -13,6 +13,9 @@ cdk.out
 .vscode
 .DS_Store
 
+# umccr-docs build and preview output, for the docs.umccr.org site
+.umccr-docs
+
 # application
 app/node_modules
 app/dist
