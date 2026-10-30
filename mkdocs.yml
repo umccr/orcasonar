@@ -1,0 +1,30 @@
+# Published site: https://docs.umccr.org/orcasonar/ (UMCCR sign-in required).
+#
+# A push to main that changes docs/ or this file is built and published by the docs.umccr.org platform
+# (umccr/docs-platform); this repository needs no workflow for it. Only docs/ is published. A link from it to the
+# code, such as ../app/schema/openapi.yaml, points at the file on GitHub. See README.md, "Published site".
+site_name: OrcaSonar
+site_description: 'The service behind the chat panel: its design, API, deployment and operation.'
+site_url: https://docs.umccr.org/orcasonar/
+repo_url: https://github.com/umccr/orcasonar
+repo_name: umccr/orcasonar
+edit_uri: edit/main/docs/
+docs_dir: docs
+
+# A link to a heading that does not exist fails the strict build, as a link to a missing page does.
+validation:
+  anchors: warn
+
+extra:
+  platform:
+    # The project page, the place to start, becomes the site's front page, index.md.
+    home: project.md
+
+nav:
+  - Project: index.md
+  - Design: design.md
+  - Architecture: architecture.md
+  - API: api.md
+  - Tech stack: tech.md
+  - Deploying: deploy.md
+  - Runbook: runbook.md

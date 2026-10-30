@@ -97,6 +97,15 @@ curl -N -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
   -d '{"query":"How do I add a site?"}' http://127.0.0.1:8787/api/v1/chat
 ```
 
+## Published site
+
+`docs/` is published to <https://docs.umccr.org/orcasonar/>, readable by all UMCCR staff, and its pages are in the
+knowledge base the chat panel answers from. A push to `main` that changes `docs/` or `mkdocs.yml` publishes it,
+through docs.umccr.org's own pipeline: this repository needs no workflow for it, and a failed build leaves the site
+as it was. [`project.md`](docs/project.md) is the front page. A link from `docs/` to a file outside it, such as
+`../app/schema/openapi.yaml`, points at the file on GitHub. Preview the site with docs-platform's toolkit
+([onboarding](https://docs.umccr.org/platform/onboarding/#2-add-the-configuration)), then `umccr-docs serve`.
+
 ## Data and privacy
 
 Everything OrcaSonar stores is encrypted with one Sonar KMS key, in ap-southeast-2. Answers come from Claude through
