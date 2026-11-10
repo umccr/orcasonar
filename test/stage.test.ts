@@ -10,7 +10,12 @@ import {
   getOrcaSonarStatelessStackProps,
   OrcaSonarStage,
 } from '../infrastructure/stage/config';
-import { APP_ROOT, AUDIT_INDEX, SSM_PARAMETERS } from '../infrastructure/stage/constants';
+import {
+  APP_ROOT,
+  AUDIT_CALLER_INDEX,
+  AUDIT_INDEX,
+  SSM_PARAMETERS,
+} from '../infrastructure/stage/constants';
 import { OrcaSonarStatefulStack } from '../infrastructure/stage/stateful-stack';
 import { OrcaSonarStatelessStack } from '../infrastructure/stage/stateless-stack';
 import {
@@ -148,8 +153,9 @@ describe('stateful stack', () => {
     });
   });
 
-  // A table update can create one index at most, so a second needs a deploy of its own.
-  test('indexes the audit log by time, with one index only', () => {
+  // A table update can create or delete one index at most, and a projection cannot change once the index exists, so
+  // either change needs deploys of its own.
+  test('indexes the audit log by time, and by caller with only what a list of conversations needs', () => {
     template.hasResourceProperties('AWS::DynamoDB::Table', {
       GlobalSecondaryIndexes: [
         {
@@ -159,6 +165,17 @@ describe('stateful stack', () => {
             { AttributeName: 'at', KeyType: 'RANGE' },
           ],
           Projection: { ProjectionType: 'ALL' },
+        },
+        {
+          IndexName: AUDIT_CALLER_INDEX,
+          KeySchema: [
+            { AttributeName: 'callerId', KeyType: 'HASH' },
+            { AttributeName: 'at', KeyType: 'RANGE' },
+          ],
+          Projection: {
+            ProjectionType: 'INCLUDE',
+            NonKeyAttributes: ['conversationId', 'question', 'outcome'],
+          },
         },
       ],
     });
@@ -274,7 +291,7 @@ describe('stateless stack', () => {
         });
       }
     }
-    expect(methods.filter((method) => method.integration.Type === 'AWS_PROXY')).toHaveLength(7);
+    expect(methods.filter((method) => method.integration.Type === 'AWS_PROXY')).toHaveLength(10);
   });
 
   test('serves the audit log from its own function, the only one that knows the audit group', () => {
@@ -294,6 +311,7 @@ describe('stateless stack', () => {
 
     const routes = methods.filter((method) => method.route.startsWith('GET /api/v1/audit/'));
     expect(routes.map((method) => method.route).sort()).toEqual([
+      'GET /api/v1/audit/conversations',
       'GET /api/v1/audit/conversations/{conversationId}',
       'GET /api/v1/audit/exchanges',
       'GET /api/v1/audit/usage',
@@ -310,6 +328,30 @@ describe('stateless stack', () => {
     );
     expect(reading).toHaveLength(1);
     expect(JSON.stringify(reading[0])).toContain('AuditFunctionServiceRole');
+    expect(JSON.stringify(reading[0])).toContain('dynamodb:Query');
+  });
+
+  // History holds no audit information, so it needs neither the audit group nor the audit function.
+  test("serves a reader's history from the query function, the only one that may query the index by caller", () => {
+    const [queryId] = Object.entries(resources).find(
+      ([id, resource]) =>
+        resource.Type === 'AWS::Lambda::Function' && id.startsWith('QueryFunction')
+    )!;
+    const routes = methods.filter((method) => method.route.startsWith('GET /api/v1/chat/'));
+    expect(routes.map((method) => method.route).sort()).toEqual([
+      'GET /api/v1/chat/history',
+      'GET /api/v1/chat/history/{conversationId}',
+    ]);
+    for (const route of routes) {
+      expect(route.authorization).toBe('CUSTOM');
+      expect(JSON.stringify(route.integration)).toContain(queryId);
+    }
+
+    const reading = Object.values(template.findResources('AWS::IAM::Policy')).filter((policy) =>
+      JSON.stringify(policy).includes(`/index/${AUDIT_CALLER_INDEX}`)
+    );
+    expect(reading).toHaveLength(1);
+    expect(JSON.stringify(reading[0])).toContain('QueryFunctionServiceRole');
     expect(JSON.stringify(reading[0])).toContain('dynamodb:Query');
   });
 
@@ -361,10 +403,10 @@ describe('stateless stack', () => {
   });
 
   test.each(STAGES)(
-    "%s accepts ID tokens from the docs panel's and OrcaUI's clients, and no other",
+    "%s accepts ID tokens from the docs panel's and OrcaUI's clients, and from no other host",
     (stage) => {
       const props = getOrcaSonarStatelessStackProps(stage);
-      expect(props.allowedClientIdParameters).toEqual([
+      expect(props.allowedClientIdParameters.slice(0, 2)).toEqual([
         '/cognito/docs-app/app-client-id',
         '/orcaui/cog_app_client_id_stage',
       ]);
@@ -372,11 +414,26 @@ describe('stateless stack', () => {
     }
   );
 
-  test("passes both clients' IDs to the authorizer, read from SSM at deploy", () => {
+  test('accepts the localhost client in beta only, for portal apps run locally against dev', () => {
+    expect(getOrcaSonarStatelessStackProps('BETA').allowedClientIdParameters).toEqual([
+      '/cognito/docs-app/app-client-id',
+      '/orcaui/cog_app_client_id_stage',
+      '/cognito/localhost-app/app-client-id',
+    ]);
+    expect(getOrcaSonarStatelessStackProps('PROD').allowedClientIdParameters).not.toContain(
+      '/cognito/localhost-app/app-client-id'
+    );
+  });
+
+  test("passes the clients' IDs to the authorizer, read from SSM at deploy", () => {
     const parameters = JSON.stringify(template.toJSON().Parameters);
     expect(parameters).toContain('/cognito/docs-app/app-client-id');
     expect(parameters).toContain('/orcaui/cog_app_client_id_stage');
+    expect(parameters).not.toContain('/cognito/localhost-app/app-client-id');
     expect(parameters).not.toContain('/data_portal/client/data2/cog_app_client_id_stage');
+    expect(
+      JSON.stringify(Template.fromStack(statelessStack('BETA').stack).toJSON().Parameters)
+    ).toContain('/cognito/localhost-app/app-client-id');
   });
 
   test('puts WAF in front of the API', () => {

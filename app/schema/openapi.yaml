@@ -19,9 +19,9 @@ paths:
       description: |
         With `Accept: text/event-stream` the answer streams as server-sent events, in this order: `meta`
         (`{exchangeId, conversationId}`), `delta` (`{text}`, repeated), `citations` (an array of citations), `done`
-        (`{usage}`). An `error` event (`{code, message}`) ends the stream early. Otherwise the response is one JSON
-        object. Pass `conversationId` from a previous answer to ask a follow-up. The answer is Markdown, and `[n]` in
-        it cites the citation whose `ref` is n.
+        (`{usage, costUsd}`). An `error` event (`{code, message}`) ends the stream early. Otherwise the response is one
+        JSON object. Pass `conversationId` from a previous answer to ask a follow-up. The answer is Markdown, and `[n]`
+        in it cites the citation whose `ref` is n.
       requestBody:
         required: true
         content:
@@ -40,6 +40,60 @@ paths:
         '403': { $ref: '#/components/responses/Error' }
         '429': { $ref: '#/components/responses/TooMany' }
         '503': { $ref: '#/components/responses/Error' }
+  /chat/history:
+    get:
+      summary: Your conversations, most recently active first
+      description: |
+        The signed-in reader's own conversations from the last 30 days, each titled by its first question, for a chat
+        panel to list. It holds the conversations and nothing the audit log adds about them: no email, client, cost or
+        tokens. Questions that failed are left out. To read the next page, pass `nextCursor` as `cursor` with the same
+        `limit`.
+      parameters:
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: A page of conversations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/HistoryConversation' }
+                  nextCursor:
+                    type: string
+                    description: Present when there may be more; pass it as `cursor`.
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+  /chat/history/{conversationId}:
+    get:
+      summary: One of your conversations, oldest first
+      description: |
+        The questions and answers of one of the reader's own conversations, with the pages each answer cited, to show
+        it again; `POST /chat` with its `conversationId` continues it. Questions that failed are left out. Another
+        reader's conversation is `403`, as it is for a follow-up; one that history does not hold is `404`.
+      parameters:
+        - { $ref: '#/components/parameters/ConversationId' }
+      responses:
+        '200':
+          description: The conversation's questions and answers
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [conversationId, exchanges]
+                properties:
+                  conversationId: { type: string, pattern: '^c_[0-9a-f]{32}$' }
+                  exchanges:
+                    type: array
+                    items: { $ref: '#/components/schemas/HistoryExchange' }
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
   /search:
     post:
       summary: Find passages, without writing an answer
@@ -105,20 +159,10 @@ paths:
       parameters:
         - { $ref: '#/components/parameters/From' }
         - { $ref: '#/components/parameters/To' }
-        - name: caller
-          in: query
-          description: Only this reader's exchanges, by Cognito `sub` or email.
-          schema: { type: string, maxLength: 320 }
-        - name: outcome
-          in: query
-          schema: { $ref: '#/components/schemas/AuditOutcome' }
-        - name: limit
-          in: query
-          schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
-        - name: cursor
-          in: query
-          description: '`nextCursor` from the previous page.'
-          schema: { type: string }
+        - { $ref: '#/components/parameters/Caller' }
+        - { $ref: '#/components/parameters/Outcome' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
       responses:
         '200':
           description: A page of exchanges
@@ -139,14 +183,48 @@ paths:
         '400': { $ref: '#/components/responses/Error' }
         '401': { $ref: '#/components/responses/Error' }
         '403': { $ref: '#/components/responses/Error' }
+  /audit/conversations:
+    get:
+      summary: The audit log by conversation, most recently active first (administrators only)
+      description: |
+        Each conversation with exchanges in the window: who asked, the first question, and what its exchanges in the
+        window add up to. A conversation that began before the window counts only the exchanges inside it;
+        `/audit/conversations/{conversationId}` has all of it. `caller` keeps one reader's conversations, and `outcome`
+        those with at least one exchange that ended that way. `total` counts every conversation that matches, across
+        pages. Access and paging are as for `/audit/exchanges`.
+      parameters:
+        - { $ref: '#/components/parameters/From' }
+        - { $ref: '#/components/parameters/To' }
+        - { $ref: '#/components/parameters/Caller' }
+        - { $ref: '#/components/parameters/Outcome' }
+        - { $ref: '#/components/parameters/Limit' }
+        - { $ref: '#/components/parameters/Cursor' }
+      responses:
+        '200':
+          description: A page of conversations
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [from, to, total, items]
+                properties:
+                  from: { type: string, format: date-time }
+                  to: { type: string, format: date-time }
+                  total: { type: integer, description: 'Conversations that match, on every page' }
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/AuditConversation' }
+                  nextCursor:
+                    type: string
+                    description: Present when there may be more; pass it as `cursor`.
+        '400': { $ref: '#/components/responses/Error' }
+        '401': { $ref: '#/components/responses/Error' }
+        '403': { $ref: '#/components/responses/Error' }
   /audit/conversations/{conversationId}:
     get:
       summary: A whole conversation from the audit log, oldest first (administrators only)
       parameters:
-        - name: conversationId
-          in: path
-          required: true
-          schema: { type: string, pattern: '^c_[0-9a-f]{32}$' }
+        - { $ref: '#/components/parameters/ConversationId' }
       responses:
         '200':
           description: The conversation's exchanges, with their full answers and sources
@@ -215,6 +293,29 @@ components:
       in: query
       description: End of the window, a UTC date (its end) or an ISO time in UTC. Defaults to now.
       schema: { type: string }
+    Caller:
+      name: caller
+      in: query
+      description: Only this reader's, by Cognito `sub` or email, in any case.
+      schema: { type: string, maxLength: 320 }
+    Outcome:
+      name: outcome
+      in: query
+      schema: { $ref: '#/components/schemas/AuditOutcome' }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 50 }
+    Cursor:
+      name: cursor
+      in: query
+      description: '`nextCursor` from the previous page.'
+      schema: { type: string }
+    ConversationId:
+      name: conversationId
+      in: path
+      required: true
+      schema: { type: string, pattern: '^c_[0-9a-f]{32}$' }
   responses:
     Error:
       description: An error
@@ -247,7 +348,7 @@ components:
         mode: { type: string, enum: [ask], default: ask }
     ChatResponse:
       type: object
-      required: [exchangeId, conversationId, answer, citations, usage]
+      required: [exchangeId, conversationId, answer, citations, usage, costUsd]
       properties:
         exchangeId: { type: string, pattern: '^x_[0-9a-f]{32}$' }
         conversationId: { type: string, pattern: '^c_[0-9a-f]{32}$' }
@@ -256,6 +357,9 @@ components:
           type: array
           items: { $ref: '#/components/schemas/Citation' }
         usage: { $ref: '#/components/schemas/Usage' }
+        costUsd:
+          type: number
+          description: What the answer cost, in US dollars, as the reader's daily allowance counts it
     SearchRequest:
       type: object
       required: [query]
@@ -291,6 +395,45 @@ components:
               type: integer
               minimum: 1
               description: 'The number the answer cites this source by: `[2]` cites the citation whose `ref` is 2'
+    CitedSource:
+      description: >-
+        A page a saved answer cited, as the citation the reader was shown. `ref` is the number the answer cites it by,
+        as in `[2]`. Answers saved before the whole citation was kept have only `id`, `url` and `score`.
+      type: object
+      required: [id, url, score]
+      properties:
+        ref: { type: integer, minimum: 1 }
+        id: { type: string, description: '`<site>:<path>`, usable with /documents/{id}' }
+        title: { type: string }
+        url: { type: string }
+        site: { type: string }
+        snippet: { type: string }
+        score: { type: number }
+    HistoryConversation:
+      type: object
+      required: [conversationId, title, startedAt, lastAt, questions]
+      properties:
+        conversationId: { type: string, pattern: '^c_[0-9a-f]{32}$' }
+        title: { type: string, description: 'Its first question' }
+        startedAt: { type: string, format: date-time }
+        lastAt: { type: string, format: date-time, description: 'When its last question was asked' }
+        questions: { type: integer, description: 'Questions it holds, failed ones left out' }
+    HistoryExchange:
+      type: object
+      required: [exchangeId, at, question, answer, citations]
+      properties:
+        exchangeId: { type: string, pattern: '^x_[0-9a-f]{32}$' }
+        at: { type: string, format: date-time }
+        question: { type: string }
+        sites: { $ref: '#/components/schemas/Sites' }
+        answer:
+          {
+            type: string,
+            description: 'Markdown, as the reader saw it; `[n]` cites the citation whose `ref` is n',
+          }
+        citations:
+          type: array
+          items: { $ref: '#/components/schemas/CitedSource' }
     Document:
       type: object
       required: [id, site, title, url, updated, markdown]
@@ -343,18 +486,52 @@ components:
         answer: { type: string, description: 'Markdown, as the reader saw it' }
         sources:
           type: array
-          items:
-            type: object
-            required: [id, url, score]
-            properties:
-              id: { type: string }
-              url: { type: string }
-              score: { type: number }
+          items: { $ref: '#/components/schemas/CitedSource' }
         modelId: { type: string }
         usage: { $ref: '#/components/schemas/Usage' }
         costUsd: { type: number }
         guardrail: { type: string, enum: [none, intervened] }
         latencyMs: { type: integer }
+    AuditConversation:
+      description: A conversation's exchanges in the window, and what they add up to
+      type: object
+      required:
+        [
+          conversationId,
+          caller,
+          startedAt,
+          lastAt,
+          firstQuestion,
+          questions,
+          answered,
+          notCovered,
+          failed,
+          sites,
+          inputTokens,
+          outputTokens,
+          guardrailInterventions,
+          costUsd,
+        ]
+      properties:
+        conversationId: { type: string, pattern: '^c_[0-9a-f]{32}$' }
+        caller: { $ref: '#/components/schemas/AuditCaller' }
+        startedAt:
+          { type: string, format: date-time, description: 'Its first exchange in the window' }
+        lastAt: { type: string, format: date-time, description: 'Its last exchange in the window' }
+        firstQuestion: { type: string, description: 'The question it asked first in the window' }
+        questions: { type: integer }
+        answered: { type: integer }
+        notCovered: { type: integer }
+        failed: { type: integer }
+        sites:
+          type: array
+          items: { type: string }
+          description: Every docs site its questions were limited to; empty when none was
+        inputTokens: { type: integer }
+        outputTokens: { type: integer }
+        guardrailInterventions:
+          { type: integer, description: 'Answers the guardrail intervened in' }
+        costUsd: { type: number }
     AuditUsage:
       type: object
       required: [from, to, totals, callers]

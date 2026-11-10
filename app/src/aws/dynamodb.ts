@@ -1,4 +1,4 @@
-import type { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import type { DynamoDBDocumentClient, QueryCommandInput } from '@aws-sdk/lib-dynamodb';
 import {
   DeleteCommand,
   GetCommand,
@@ -12,7 +12,14 @@ import type { OverBudget, Spend, SpendKeys, SpendStore } from '../services/budge
 import type { IngestState, StaleMark, StartedJob } from '../services/ingestion';
 import { HISTORY_TURNS } from '../services/prompt';
 import type { Turn } from '../services/prompt';
-import type { AuditEntry, AuditQuery, AuditStore, ConversationStore } from '../services/stores';
+import type {
+  AuditEntry,
+  AuditOutcome,
+  AuditQuery,
+  AuditStore,
+  CallerExchange,
+  ConversationStore,
+} from '../services/stores';
 
 /**
  * One table, keyed `pk`/`sk`, holds budget counters, conversation turns, the audit log and the ingestion state. Items
@@ -202,6 +209,9 @@ export class DynamoConversationStore implements ConversationStore {
 export const AUDIT_INDEX = 'audit-by-time';
 const AUDIT_PARTITION = 'exchange';
 
+/** The index that lists one caller's exchanges by time, for their history: `callerId` and `at`. */
+export const AUDIT_CALLER_INDEX = 'audit-by-caller';
+
 /** Where a page of the audit log stopped: the last entry's keys in the table and in the index. */
 const AuditCursor = z.object({
   pk: z.string().regex(/^audit#c_[0-9a-f]{32}$/),
@@ -237,9 +247,23 @@ const toEntry = (item: Record<string, unknown>): AuditEntry =>
   ) as unknown as AuditEntry;
 
 /**
- * The audit log: one item per exchange, `audit#<conversation>` and `<at>#<exchange>`, kept 30 days. The index lists
- * them by time, and a caller or an outcome is filtered as the entries are read. That reads every entry in the window,
- * which the budget keeps to about a hundred a day; an index by caller can follow if it ever grows.
+ * An item of the index by caller, which holds only these besides the keys. Named one by one, so the list of
+ * conversations never sees more, whatever the index holds. Keep in step with `AUDIT_CALLER_ATTRIBUTES` in
+ * `infrastructure/stage/constants.ts`.
+ */
+const toCallerExchange = (item: Record<string, unknown>): CallerExchange => ({
+  callerId: String(item['callerId']),
+  at: String(item['at']),
+  conversationId: String(item['conversationId']),
+  question: String(item['question']),
+  outcome: item['outcome'] as AuditOutcome,
+});
+
+/**
+ * The audit log: one item per exchange, `audit#<conversation>` and `<at>#<exchange>`, kept 30 days. One index lists
+ * them by time, and for the audit routes a caller or an outcome is filtered as the entries are read. That reads every
+ * entry in the window, which the budget keeps to about a hundred a day. A second index lists one caller's exchanges by
+ * time, with only what a list of conversations needs, so a reader's own history never reads anyone else's.
  */
 export class DynamoAuditStore implements AuditStore {
   constructor(
@@ -295,33 +319,45 @@ export class DynamoAuditStore implements AuditStore {
   }
 
   async between(from: string, to: string): Promise<AuditEntry[]> {
-    const items: AuditEntry[] = [];
-    for await (const item of this.byTime(from, to, { names: {}, values: {} })) {
-      items.push(toEntry(item));
-    }
-    return items;
+    return this.all(this.byTime(from, to, { names: {}, values: {} }), toEntry);
+  }
+
+  async byCaller(callerId: string, from: string, to: string): Promise<CallerExchange[]> {
+    return this.all(
+      this.pages({
+        IndexName: AUDIT_CALLER_INDEX,
+        KeyConditionExpression: '#callerId = :caller AND #at BETWEEN :from AND :to',
+        ExpressionAttributeNames: { '#callerId': 'callerId', '#at': 'at' },
+        ExpressionAttributeValues: { ':caller': callerId, ':from': from, ':to': to },
+        ScanIndexForward: false,
+      }),
+      toCallerExchange
+    );
   }
 
   async conversation(conversationId: string): Promise<AuditEntry[]> {
-    const items: AuditEntry[] = [];
-    let startKey: Record<string, unknown> | undefined;
-    do {
-      const result = await this.client.send(
-        new QueryCommand({
-          TableName: this.tableName,
-          KeyConditionExpression: 'pk = :pk',
-          ExpressionAttributeValues: { ':pk': `audit#${conversationId}` },
-          ExclusiveStartKey: startKey,
-        })
-      );
-      items.push(...(result.Items ?? []).map(toEntry));
-      startKey = result.LastEvaluatedKey;
-    } while (startKey);
-    return items;
+    return this.all(
+      this.pages({
+        KeyConditionExpression: 'pk = :pk',
+        ExpressionAttributeValues: { ':pk': `audit#${conversationId}` },
+      }),
+      toEntry
+    );
+  }
+
+  private async all<T>(
+    items: AsyncIterable<Record<string, unknown>>,
+    map: (item: Record<string, unknown>) => T
+  ): Promise<T[]> {
+    const all: T[] = [];
+    for await (const item of items) {
+      all.push(map(item));
+    }
+    return all;
   }
 
   /** The entries between two ISO times, newest first, a page of the index at a time. */
-  private async *byTime(
+  private byTime(
     from: string,
     to: string,
     options: {
@@ -331,28 +367,37 @@ export class DynamoAuditStore implements AuditStore {
       startKey?: Record<string, unknown>;
     }
   ): AsyncGenerator<Record<string, unknown>> {
-    let startKey = options.startKey;
+    return this.pages(
+      {
+        IndexName: AUDIT_INDEX,
+        KeyConditionExpression: '#auditPk = :partition AND #at BETWEEN :from AND :to',
+        FilterExpression: options.filter,
+        ExpressionAttributeNames: { '#auditPk': 'auditPk', '#at': 'at', ...options.names },
+        ExpressionAttributeValues: {
+          ':partition': AUDIT_PARTITION,
+          ':from': from,
+          ':to': to,
+          ...options.values,
+        },
+        ScanIndexForward: false,
+      },
+      options.startKey
+    );
+  }
+
+  /** Every item a query matches, a page at a time, from `startKey` when given. */
+  private async *pages(
+    query: Omit<QueryCommandInput, 'TableName' | 'ExclusiveStartKey'>,
+    startKey?: Record<string, unknown>
+  ): AsyncGenerator<Record<string, unknown>> {
+    let next = startKey;
     do {
       const result = await this.client.send(
-        new QueryCommand({
-          TableName: this.tableName,
-          IndexName: AUDIT_INDEX,
-          KeyConditionExpression: '#auditPk = :partition AND #at BETWEEN :from AND :to',
-          FilterExpression: options.filter,
-          ExpressionAttributeNames: { '#auditPk': 'auditPk', '#at': 'at', ...options.names },
-          ExpressionAttributeValues: {
-            ':partition': AUDIT_PARTITION,
-            ':from': from,
-            ':to': to,
-            ...options.values,
-          },
-          ScanIndexForward: false,
-          ExclusiveStartKey: startKey,
-        })
+        new QueryCommand({ TableName: this.tableName, ...query, ExclusiveStartKey: next })
       );
       yield* result.Items ?? [];
-      startKey = result.LastEvaluatedKey;
-    } while (startKey);
+      next = result.LastEvaluatedKey;
+    } while (next);
   }
 }
 

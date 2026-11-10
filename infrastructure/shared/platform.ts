@@ -31,8 +31,15 @@ export const USER_POOL_ID_PARAMETER = '/data_portal/client/cog_user_pool_id';
 export const ORCAUI_CLIENT_ID_PARAMETER = '/orcaui/cog_app_client_id_stage';
 
 /**
+ * The dev pool's client for portal apps run on a developer's machine, at `http://localhost:3000/<app path>/`, from
+ * `umccr/infrastructure` `cognito_aai/app_local.tf`. It exists in dev only.
+ */
+export const LOCALHOST_CLIENT_ID_PARAMETER = '/cognito/localhost-app/app-client-id';
+
+/**
  * OrcaUI's hosts, by OrcaBus's stage names: it serves on `portal.<stage>` and `orcaui.<stage>`. OrcaBus also allows
- * `http://localhost:3000` in beta, for its local app client, which OrcaSonar does not accept.
+ * `http://localhost:3000` in beta, for its local app client. OrcaSonar accepts that client's tokens in beta but not
+ * the origin: an app run locally calls it through its dev server's proxy, as the OrcaSonar Console does.
  */
 export const ORCAUI_ORIGINS: Record<'BETA' | 'PROD', string[]> = {
   BETA: ['https://orcaui.dev.umccr.org', 'https://portal.dev.umccr.org'],

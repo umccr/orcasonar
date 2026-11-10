@@ -63,6 +63,7 @@ import {
   API_BASE_PATH,
   API_DOMAIN_PREFIX,
   APP_ROOT,
+  AUDIT_CALLER_INDEX,
   AUDIT_INDEX,
   DOCS_PREFIX,
   REPO_ROOT,
@@ -201,6 +202,7 @@ const staticGet = (
  * authorizer that accepts Cognito ID tokens from allowed clients only.
  *
  *   POST /api/v1/chat           chat Lambda, streamed (server-sent events)
+ *   GET  /api/v1/chat/history…  query Lambda: the caller's own conversations
  *   POST /api/v1/search         query Lambda
  *   GET  /api/v1/documents/{id} query Lambda
  *   POST /api/v1/feedback       query Lambda
@@ -299,6 +301,14 @@ export class OrcaSonarStatelessStack extends Stack {
       environment: { ...common, INGEST_BUCKET: ingestBucket.bucketName },
     });
     table.grantReadData(query);
+    // A reader's own history, through the index by caller, which the grants of a table imported by name do not cover.
+    // The caller comes from the token, so it reads only that caller's entries.
+    query.addToRolePolicy(
+      new PolicyStatement({
+        actions: ['dynamodb:Query'],
+        resources: [`${table.tableArn}/index/${AUDIT_CALLER_INDEX}`],
+      })
+    );
     ingestBucket.grantRead(query, `${DOCS_PREFIX}*`);
     recordsBucket.grantPut(query, 'feedback/*');
     query.addToRolePolicy(
@@ -464,7 +474,8 @@ export class OrcaSonarStatelessStack extends Stack {
     let base: Resource = api.root.addResource('api');
     base = base.addResource('v1');
 
-    base.addResource('chat').addMethod(
+    const chat = base.addResource('chat');
+    chat.addMethod(
       'POST',
       new LambdaIntegration(parts.chat, {
         proxy: true,
@@ -474,16 +485,19 @@ export class OrcaSonarStatelessStack extends Stack {
       secured
     );
     const query = new LambdaIntegration(parts.query, { proxy: true });
+    // Ordinary JSON, so the query function answers it rather than the streaming chat function.
+    const history = chat.addResource('history');
+    history.addMethod('GET', query, secured);
+    history.addResource('{conversationId}').addMethod('GET', query, secured);
     base.addResource('search').addMethod('POST', query, secured);
     base.addResource('documents').addResource('{id}').addMethod('GET', query, secured);
     base.addResource('feedback').addMethod('POST', query, secured);
     const audit = new LambdaIntegration(parts.audit, { proxy: true });
     const auditBase = base.addResource('audit');
     auditBase.addResource('exchanges').addMethod('GET', audit, secured);
-    auditBase
-      .addResource('conversations')
-      .addResource('{conversationId}')
-      .addMethod('GET', audit, secured);
+    const conversations = auditBase.addResource('conversations');
+    conversations.addMethod('GET', audit, secured);
+    conversations.addResource('{conversationId}').addMethod('GET', audit, secured);
     auditBase.addResource('usage').addMethod('GET', audit, secured);
 
     // The open routes never reach a function, so nothing without a token can run code that reads data or calls Bedrock.
@@ -647,7 +661,7 @@ export class OrcaSonarStatelessStack extends Stack {
 
     new Alarm(this, 'ApiServerErrorsAlarm', {
       alarmDescription:
-        'OrcaSonar API 5XX responses: searches, documents, feedback or audit reads that failed, ' +
+        'OrcaSonar API 5XX responses: searches, documents, feedback, history or audit reads that failed, ' +
         'or answers that failed before they started streaming',
       metric: api.metricServerError({ period: Duration.minutes(15), statistic: Stats.SUM }),
       threshold: 3,

@@ -1,6 +1,10 @@
 import { RemovalPolicy } from 'aws-cdk-lib';
 import { RetentionDays } from 'aws-cdk-lib/aws-logs';
-import { ORCAUI_CLIENT_ID_PARAMETER, ORCAUI_ORIGINS } from '../shared/platform';
+import {
+  LOCALHOST_CLIENT_ID_PARAMETER,
+  ORCAUI_CLIENT_ID_PARAMETER,
+  ORCAUI_ORIGINS,
+} from '../shared/platform';
 import { DOCS_APP_CLIENT_ID_PARAMETER } from './constants';
 import { OrcaSonarStatefulStackProps } from './stateful-stack';
 import { OrcaSonarStatelessStackProps } from './stateless-stack';
@@ -18,13 +22,14 @@ export const DOCS_ORIGINS: Record<OrcaSonarStage, string[]> = {
 
 /**
  * The Cognito app clients whose ID tokens the authorizer accepts, by the SSM parameters that hold their IDs: the docs
- * chat panel and OrcaUI. Each caller is added by name rather than taking OrcaBus's whole list, which also holds the
- * token service's client for machines and, in beta, a local client. Machine callers wait for caps of their own.
+ * chat panel and OrcaUI, and in beta the localhost client, for portal apps such as the OrcaSonar Console run on a
+ * developer's machine against dev. Each caller is added by name rather than taking OrcaBus's whole list, which also
+ * holds the token service's client for machines. Machine callers wait for caps of their own.
  */
-export const ALLOWED_CLIENT_ID_PARAMETERS = [
-  DOCS_APP_CLIENT_ID_PARAMETER,
-  ORCAUI_CLIENT_ID_PARAMETER,
-];
+export const ALLOWED_CLIENT_ID_PARAMETERS: Record<OrcaSonarStage, string[]> = {
+  BETA: [DOCS_APP_CLIENT_ID_PARAMETER, ORCAUI_CLIENT_ID_PARAMETER, LOCALHOST_CLIENT_ID_PARAMETER],
+  PROD: [DOCS_APP_CLIENT_ID_PARAMETER, ORCAUI_CLIENT_ID_PARAMETER],
+};
 
 /**
  * Claude through the Australian cross-Region inference profiles, which run in Sydney and Melbourne only. Confirm the
@@ -80,7 +85,7 @@ export const getOrcaSonarStatelessStackProps = (
 ): OrcaSonarStatelessStackProps => ({
   stageSlug: STAGE_SLUG[stage],
   corsAllowOrigins: [...DOCS_ORIGINS[stage], ...ORCAUI_ORIGINS[stage]],
-  allowedClientIdParameters: ALLOWED_CLIENT_ID_PARAMETERS,
+  allowedClientIdParameters: ALLOWED_CLIENT_ID_PARAMETERS[stage],
   answerModelId: ANSWER_MODEL_ID,
   allowedModelIds: ALLOWED_MODEL_IDS,
   modelRegions: MODEL_REGIONS,

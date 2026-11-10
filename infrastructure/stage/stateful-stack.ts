@@ -28,6 +28,8 @@ import { StringParameter } from 'aws-cdk-lib/aws-ssm';
 import { Construct } from 'constructs';
 import { addGitCommitIdOutput } from '../shared/git-commit';
 import {
+  AUDIT_CALLER_ATTRIBUTES,
+  AUDIT_CALLER_INDEX,
   AUDIT_INDEX,
   DOCS_PREFIX,
   DOCS_PUBLISHER_ROLE_NAME,
@@ -150,13 +152,24 @@ export class OrcaSonarStatefulStack extends Stack {
       deletionProtection: props.deletionProtection,
       removalPolicy: props.removalPolicy,
     });
-    // The audit log by time. Only audit items carry `auditPk`, so the index holds nothing else. A table update can
-    // create one index at most, so a second, such as one by caller, needs a deploy of its own.
+    // The audit log by time, for the audit routes. Only audit items carry `auditPk`, so the index holds nothing else.
     table.addGlobalSecondaryIndex({
       indexName: AUDIT_INDEX,
       partitionKey: { name: 'auditPk', type: AttributeType.STRING },
       sortKey: { name: 'at', type: AttributeType.STRING },
       projectionType: ProjectionType.ALL,
+    });
+    // Each caller's exchanges by time, for their own history, so it never reads anyone else's. Only audit items carry
+    // `callerId`, so this index too holds nothing else, and DynamoDB fills it from the entries already kept. It holds
+    // only what the list of conversations needs, not the answers, which one conversation reads from the table. A table
+    // update can create or delete one index at most, and an index's projection cannot change once it exists, so a
+    // third index, or another projection, needs deploys of its own.
+    table.addGlobalSecondaryIndex({
+      indexName: AUDIT_CALLER_INDEX,
+      partitionKey: { name: 'callerId', type: AttributeType.STRING },
+      sortKey: { name: 'at', type: AttributeType.STRING },
+      projectionType: ProjectionType.INCLUDE,
+      nonKeyAttributes: AUDIT_CALLER_ATTRIBUTES,
     });
 
     const knowledgeBase = this.knowledgeBase(props, key, ingestBucket);

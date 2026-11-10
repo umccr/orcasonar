@@ -5,11 +5,26 @@ import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { ApiError, errorDetail, invalidRequest } from './lib/errors';
 import { newId } from './lib/ids';
-import { auditExchange, auditRow, auditWindow, usageByCaller } from './services/audit';
+import { CONVERSATION_KEY, conversationKey, cursorWindow, pageAfter } from './lib/pages';
+import {
+  AUDIT_WINDOW_DAYS,
+  auditConversations,
+  auditExchange,
+  auditRow,
+  auditWindow,
+  usageByCaller,
+} from './services/audit';
 import type { Budget } from './services/budget';
 import type { Caller, ChatDeps, ChatEvent, ChatRequest, ChatResult } from './services/chat';
 import { answerQuestion } from './services/chat';
 import { parseDocumentId } from './services/documents';
+import {
+  HISTORY_DAYS,
+  historyConversations,
+  historyExchange,
+  historyWindow,
+  shownInHistory,
+} from './services/history';
 import type { Retriever } from './services/retrieval';
 import { MAX_QUESTION_CHARACTERS, toSource } from './services/retrieval';
 import type { DocumentStore, RecordStore } from './services/stores';
@@ -38,10 +53,13 @@ export interface AppDeps extends Omit<ChatDeps, 'budget' | 'answerer'> {
  */
 export const ROUTES = [
   { method: 'post', path: '/chat' },
+  { method: 'get', path: '/chat/history' },
+  { method: 'get', path: '/chat/history/{conversationId}' },
   { method: 'post', path: '/search' },
   { method: 'get', path: '/documents/{id}' },
   { method: 'post', path: '/feedback' },
   { method: 'get', path: '/audit/exchanges' },
+  { method: 'get', path: '/audit/conversations' },
   { method: 'get', path: '/audit/conversations/{conversationId}' },
   { method: 'get', path: '/audit/usage' },
 ] as const;
@@ -89,8 +107,16 @@ const AuditListQuery = z.object({
 
 const AuditUsageQuery = z.object({ from: Moment, to: Moment });
 
-/** A page of the audit log carries its window, so the next page reads the same one even when `to` defaulted to now. */
-const AuditCursor = z.object({ from: z.iso.datetime(), to: z.iso.datetime(), after: z.string() });
+const HistoryQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(50),
+  cursor: z.string().min(1).max(2000).optional(),
+});
+
+/**
+ * A page of a list carries its window, so the next page reads the same one even when `to` defaulted to now, and where
+ * the last page stopped.
+ */
+const PageCursor = z.object({ from: z.iso.datetime(), to: z.iso.datetime(), after: z.string() });
 
 type Env = {
   Bindings: {
@@ -121,22 +147,35 @@ const parseBody = async <T>(c: Context<Env>, schema: z.ZodType<T>): Promise<T> =
   return validated(schema, body, 'body');
 };
 
-const auditCursor = (window: { from: string; to: string }, after: string) =>
+const pageCursor = (window: { from: string; to: string }, after: string) =>
   Buffer.from(JSON.stringify({ ...window, after })).toString('base64url');
 
-const fromAuditCursor = (cursor: string) => {
+/**
+ * The cursor's window and place. It is refused unless its window spans at most `days`, as a list's own window may, and,
+ * when `after` is given, unless the place has the form it must take.
+ */
+const fromPageCursor = (cursor: string, limits: { days: number; after?: RegExp }) => {
   let parsed: unknown;
   try {
     parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
   } catch {
     parsed = undefined;
   }
-  const result = AuditCursor.safeParse(parsed);
-  if (!result.success) {
+  const result = PageCursor.safeParse(parsed);
+  const window = result.success
+    ? cursorWindow(result.data.from, result.data.to, limits.days)
+    : undefined;
+  if (!result.success || !window || (limits.after && !limits.after.test(result.data.after))) {
     throw invalidRequest('cursor must be one a previous page returned.');
   }
-  return result.data;
+  return { ...window, after: result.data.after };
 };
+
+/**
+ * Responses that hold readers' questions are never stored by a browser or anything between: the token in the request
+ * keeps them from shared caches, and this from the browser's own.
+ */
+const noStore = (c: Context<Env>) => c.header('Cache-Control', 'no-store');
 
 /** The caller the authorizer verified. API Gateway passes its context as `requestContext.authorizer`. */
 const callerFrom = (c: Context<Env>, devCaller?: Caller): Caller => {
@@ -294,7 +333,60 @@ export const createApp = (deps: AppDeps) => {
       answer: result.answer,
       citations: result.citations,
       usage: result.usage,
+      costUsd: result.costUsd,
     });
+  });
+
+  /**
+   * The caller's own conversations from the last 30 days, most recently active first. The caller is the token's, never
+   * a parameter, so no one can read another reader's history; it reads the audit log through its index by caller, so
+   * it never reads anyone else's entries either.
+   */
+  app.get('/chat/history', async (c) => {
+    const caller = callerFrom(c, deps.devCaller);
+    const query = validated(HistoryQuery, c.req.query(), 'query');
+    const cursor =
+      query.cursor === undefined
+        ? undefined
+        : fromPageCursor(query.cursor, { days: HISTORY_DAYS, after: CONVERSATION_KEY });
+    const last30Days = historyWindow(deps.clock());
+    // A later page keeps its cursor's window, but never reads back past 30 days, as one conversation does not: what is
+    // older is expired, and a cursor is not signed.
+    const window = cursor
+      ? { from: cursor.from > last30Days.from ? cursor.from : last30Days.from, to: cursor.to }
+      : last30Days;
+    const entries = await deps.audit.byCaller(caller.id, window.from, window.to);
+    const page = pageAfter(
+      historyConversations(entries),
+      conversationKey,
+      cursor?.after,
+      query.limit
+    );
+    noStore(c);
+    return c.json({
+      items: page.items,
+      nextCursor: page.after === undefined ? undefined : pageCursor(window, page.after),
+    });
+  });
+
+  /** One of the caller's own conversations, oldest first; another reader's is refused, as for a follow-up. */
+  app.get('/chat/history/:conversationId', async (c) => {
+    const caller = callerFrom(c, deps.devCaller);
+    const conversationId = validated(
+      ConversationId,
+      c.req.param('conversationId'),
+      'conversationId'
+    );
+    const entries = await deps.audit.conversation(conversationId);
+    if (entries.some((entry) => entry.callerId !== caller.id)) {
+      throw new ApiError(403, 'forbidden', 'That conversation belongs to someone else.');
+    }
+    const shown = shownInHistory(entries, historyWindow(deps.clock()).from);
+    if (shown.length === 0) {
+      throw new ApiError(404, 'not-found', 'Your history has no such conversation.');
+    }
+    noStore(c);
+    return c.json({ conversationId, exchanges: shown.map(historyExchange) });
   });
 
   app.post('/search', async (c) => {
@@ -337,7 +429,10 @@ export const createApp = (deps: AppDeps) => {
   app.get('/audit/exchanges', async (c) => {
     const viewer = auditorFrom(c);
     const query = validated(AuditListQuery, c.req.query(), 'query');
-    const cursor = query.cursor === undefined ? undefined : fromAuditCursor(query.cursor);
+    const cursor =
+      query.cursor === undefined
+        ? undefined
+        : fromPageCursor(query.cursor, { days: AUDIT_WINDOW_DAYS });
     const window = cursor
       ? { from: cursor.from, to: cursor.to }
       : auditWindow(query.from, query.to, deps.clock());
@@ -355,10 +450,46 @@ export const createApp = (deps: AppDeps) => {
       filtered: query.caller !== undefined || query.outcome !== undefined,
       count: page.items.length,
     });
+    noStore(c);
     return c.json({
       ...window,
       items: page.items.map(auditRow),
-      nextCursor: page.cursor === undefined ? undefined : auditCursor(window, page.cursor),
+      nextCursor: page.cursor === undefined ? undefined : pageCursor(window, page.cursor),
+    });
+  });
+
+  /**
+   * The audit log grouped by conversation. Like usage, it reads the whole window, which the budget keeps small, and
+   * groups and pages it here; `total` counts every conversation that matches, across pages.
+   */
+  app.get('/audit/conversations', async (c) => {
+    const viewer = auditorFrom(c);
+    const query = validated(AuditListQuery, c.req.query(), 'query');
+    const cursor =
+      query.cursor === undefined
+        ? undefined
+        : fromPageCursor(query.cursor, { days: AUDIT_WINDOW_DAYS, after: CONVERSATION_KEY });
+    const window = cursor
+      ? { from: cursor.from, to: cursor.to }
+      : auditWindow(query.from, query.to, deps.clock());
+    const conversations = auditConversations(await deps.audit.between(window.from, window.to), {
+      caller: query.caller,
+      outcome: query.outcome,
+    });
+    const page = pageAfter(conversations, conversationKey, cursor?.after, query.limit);
+    deps.log({
+      outcome: 'audit-read',
+      viewer: viewer.id,
+      route: 'conversations',
+      filtered: query.caller !== undefined || query.outcome !== undefined,
+      count: page.items.length,
+    });
+    noStore(c);
+    return c.json({
+      ...window,
+      total: conversations.length,
+      items: page.items,
+      nextCursor: page.after === undefined ? undefined : pageCursor(window, page.after),
     });
   });
 
@@ -379,6 +510,7 @@ export const createApp = (deps: AppDeps) => {
     if (entries.length === 0) {
       throw new ApiError(404, 'not-found', 'The audit log has no such conversation.');
     }
+    noStore(c);
     return c.json({ conversationId, exchanges: entries.map(auditExchange) });
   });
 
@@ -388,6 +520,7 @@ export const createApp = (deps: AppDeps) => {
     const window = auditWindow(query.from, query.to, deps.clock());
     const entries = await deps.audit.between(window.from, window.to);
     deps.log({ outcome: 'audit-read', viewer: viewer.id, route: 'usage', count: entries.length });
+    noStore(c);
     return c.json({ ...window, ...usageByCaller(entries) });
   });
 

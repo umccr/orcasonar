@@ -9,7 +9,9 @@ import { fakeDeps } from './testing/fakes';
  *
  *   curl -N -H 'Accept: text/event-stream' -H 'Content-Type: application/json' \
  *     -d '{"query":"How do I add a site?"}' http://127.0.0.1:8787/api/v1/chat
+ *   curl http://127.0.0.1:8787/api/v1/chat/history
  *   curl http://127.0.0.1:8787/api/v1/audit/exchanges
+ *   curl http://127.0.0.1:8787/api/v1/audit/conversations
  */
 const deps = fakeDeps({ now: undefined });
 const app = createApp({

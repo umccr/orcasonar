@@ -57,13 +57,15 @@ export type ChatEvent =
   | { event: 'meta'; data: { exchangeId: string; conversationId: string } }
   | { event: 'delta'; data: { text: string } }
   | { event: 'citations'; data: ReturnType<typeof toCitation>[] }
-  | { event: 'done'; data: { usage: Usage } }
+  | { event: 'done'; data: { usage: Usage; costUsd: number } }
   | { event: 'error'; data: { code: string; message: string } };
 
 export interface ChatResult {
   readonly answer: string;
   readonly citations: ReturnType<typeof toCitation>[];
   readonly usage: Usage;
+  /** What answering cost, in US dollars, as the budget counts it. */
+  readonly costUsd: number;
 }
 
 /**
@@ -179,7 +181,9 @@ export const answerQuestion = async (
       question: request.question,
       sites: request.sites,
       answer,
-      sources: cited.map((passage) => ({ id: passage.id, url: passage.url, score: passage.score })),
+      // The citations as the reader was shown them, numbered as the answer cites them, so the answer and its `[n]`
+      // can be shown again as they were.
+      sources: citations,
       modelId: modelCalled ? deps.answerer.modelId : undefined,
       usage: modelCalled ? usage : undefined,
       costUsd,
@@ -198,7 +202,7 @@ export const answerQuestion = async (
       save('audit', () => deps.audit.put({ ...exchange, email: request.caller.email, outcome })),
     ]);
 
-    await emit({ event: 'done', data: { usage } });
+    await emit({ event: 'done', data: { usage, costUsd } });
     deps.log({
       outcome,
       caller: request.caller.id,
@@ -207,7 +211,7 @@ export const answerQuestion = async (
       guardrail,
       costUsd,
     });
-    return { answer, citations, usage };
+    return { answer, citations, usage, costUsd };
   } finally {
     if (!settled) {
       await settle(spent ?? request.hold.usd);

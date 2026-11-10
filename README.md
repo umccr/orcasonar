@@ -16,7 +16,7 @@ docs.umccr.org chat panel, OrcaUI ──HTTPS──▶ AWS WAF ─▶ API Gatewa
                                                   │                                       ─▶ managed knowledge base: Retrieve
                                                   │                                       ─▶ Claude on Bedrock, with the guardrail
                                                   │                                       ─▶ 30-day records (S3)
-                                                  ├─ /search, /documents/{id}, /feedback ─▶ query Lambda
+                                                  ├─ /search, /documents/{id}, /feedback, /chat/history ─▶ query Lambda
                                                   ├─ /audit/* (admin group only) ─▶ audit Lambda ─▶ audit log (DynamoDB)
                                                   └─ /health, /schema/swagger-ui/, /schema/openapi.json ─▶ API Gateway itself:
                                                      no token and no Lambda
@@ -43,12 +43,14 @@ for what is deployed, [docs/api.md](docs/api.md) for the API, [docs/deploy.md](d
 | `POST /api/v1/search`        | The best-matching passages, without writing an answer.                                                                          |
 | `GET /api/v1/documents/{id}` | A page as the docs platform exported it; `id` is a citation's `<site>:<path>`.                                                  |
 | `POST /api/v1/feedback`      | A thumbs up or down on an answer.                                                                                               |
+| `GET /api/v1/chat/history`   | The caller's own conversations of the last 30 days; `/chat/history/{id}` shows one again, with its citations.                   |
 | `GET /api/v1/health`         | Whether the API is up. No token.                                                                                                |
 | `GET /schema/swagger-ui/`    | The API's documentation, in Swagger UI. No token.                                                                               |
 | `GET /schema/openapi.json`   | The OpenAPI contract as JSON. No token.                                                                                         |
 
 Every endpoint under `/api/v1` but `/health` needs a Cognito ID token from an allowed app client in
-`Authorization: Bearer`. It accepts the docs platform's `docs-app` client and OrcaUI's app client. The open routes are answered by
+`Authorization: Bearer`. It accepts the docs platform's `docs-app` client and OrcaUI's app client, and in beta the dev pool's
+`localhost` client, for portal apps run locally. The open routes are answered by
 API Gateway itself, so no Lambda runs without a token. The contract is
 [app/schema/openapi.yaml](app/schema/openapi.yaml), browsable at
 [sonar.dev.umccr.org/schema/swagger-ui/](https://sonar.dev.umccr.org/schema/swagger-ui/) and the same path on each

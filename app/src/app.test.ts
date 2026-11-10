@@ -30,6 +30,15 @@ const post = (path: string, body: unknown, headers: Record<string, string> = {})
 const get = (path: string) =>
   new Request(`https://sonar.dev.umccr.org/api/v1${path}`, { headers: { Origin: ORIGIN } });
 
+/** A page's cursor with its window changed, as someone could make one by hand. */
+const withCursorWindow = (cursor: string, window: { from?: string; to?: string }) =>
+  Buffer.from(
+    JSON.stringify({
+      ...(JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8')) as object),
+      ...window,
+    })
+  ).toString('base64url');
+
 /** Server-sent events as `{event, data}` pairs, data parsed from JSON. */
 const parseEvents = (text: string) =>
   text
@@ -120,8 +129,56 @@ describe('POST /chat, streamed', () => {
     ]);
     expect(stream.at(-1)).toEqual({
       event: 'done',
-      data: { usage: { inputTokens: 4920, outputTokens: 388 } },
+      data: { usage: { inputTokens: 4920, outputTokens: 388 }, costUsd: expect.any(Number) },
     });
+  });
+
+  test('ends with what the answer cost, as the budget and the record count it, streamed or not', async () => {
+    const { app, deps } = setup();
+    const streamed = await events(
+      await app.request(
+        post('/chat', { query: 'How do I add a site?' }, { Accept: 'text/event-stream' }),
+        undefined,
+        READER
+      )
+    );
+    const done = streamed.at(-1)!.data as { costUsd: number };
+    expect(done.costUsd).toBeGreaterThan(0);
+    expect(done.costUsd).toBe(deps.recordStore.exchanges[0]!.costUsd);
+
+    const plain = await app.request(post('/chat', { query: 'And publish it?' }), undefined, READER);
+    expect(await plain.json()).toMatchObject({ costUsd: deps.recordStore.exchanges[1]!.costUsd });
+  });
+
+  test('keeps each citation as the reader was shown it, with the number the answer cites it by', async () => {
+    const { app, deps } = setup({
+      answerer: new ScriptedAnswerer('Push your docs [2] once the site is registered [1][2].'),
+    });
+    const { citations } = (await (
+      await app.request(post('/chat', { query: 'How do I publish?' }), undefined, READER)
+    ).json()) as { citations: unknown[] };
+    expect(deps.recordStore.exchanges[0]!.sources).toEqual(citations);
+    expect(citations).toEqual([
+      {
+        ref: 2,
+        id: 'platform:publishing',
+        title: 'Publishing contract',
+        url: 'https://docs.umccr.org/platform/publishing/',
+        site: 'platform',
+        snippet: expect.any(String),
+        score: 0.71,
+      },
+      {
+        ref: 1,
+        id: 'platform:onboarding',
+        title: 'Onboarding a repository',
+        url: 'https://docs.umccr.org/platform/onboarding/',
+        site: 'platform',
+        snippet: expect.any(String),
+        score: 0.82,
+      },
+    ]);
+    expect(deps.auditStore.entries[0]!.sources).toEqual(citations);
   });
 
   test('numbers each citation as the answer cites it, not by its place in the list', async () => {
@@ -654,21 +711,31 @@ describe('audit log, read', () => {
     return { app, deps };
   };
 
-  test.each(['/audit/exchanges', `/audit/conversations/${conversation}`, '/audit/usage'])(
-    '%s is for the audit group only',
-    async (path) => {
-      const { app, deps } = seeded();
-      const reader = await app.request(get(path), undefined, READER);
-      expect(reader.status).toBe(403);
-      expect(await reader.json()).toMatchObject({ error: { code: 'forbidden' } });
+  const AUDIT_PATHS = [
+    '/audit/exchanges',
+    '/audit/conversations',
+    `/audit/conversations/${conversation}`,
+    '/audit/usage',
+  ];
 
-      const unconfigured = createApp({ ...deps, auditGroup: undefined });
-      expect((await unconfigured.request(get(path), undefined, ADMIN)).status).toBe(403);
-      expect((await app.request(get(path), undefined, ADMIN)).status).toBe(200);
-    }
-  );
+  test.each(AUDIT_PATHS)('%s is for the audit group only', async (path) => {
+    const { app, deps } = seeded();
+    const reader = await app.request(get(path), undefined, READER);
+    expect(reader.status).toBe(403);
+    expect(await reader.json()).toMatchObject({ error: { code: 'forbidden' } });
 
-  test.each(['/audit/exchanges', `/audit/conversations/${conversation}`, '/audit/usage'])(
+    const unconfigured = createApp({ ...deps, auditGroup: undefined });
+    expect((await unconfigured.request(get(path), undefined, ADMIN)).status).toBe(403);
+    expect((await app.request(get(path), undefined, ADMIN)).status).toBe(200);
+  });
+
+  test.each(AUDIT_PATHS)('%s is never stored by the browser', async (path) => {
+    const { app } = seeded();
+    const response = await app.request(get(path), undefined, ADMIN);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+  });
+
+  test.each(AUDIT_PATHS)(
     '%s is open to every signed-in caller where the group is *',
     async (path) => {
       const { deps } = seeded();
@@ -845,6 +912,422 @@ describe('audit log, read', () => {
         },
       ],
     });
+  });
+
+  test('groups the window by conversation, most recently active first, with what each adds up to', async () => {
+    const { app, deps } = seeded();
+    deps.auditStore.entries.push(
+      entry({
+        at: '2026-10-10T05:00:00.000Z',
+        question: 'Which branch?',
+        sites: ['platform'],
+        guardrail: 'intervened',
+        usage: { inputTokens: 100, outputTokens: 10 },
+        costUsd: 0.01,
+      })
+    );
+    const response = await app.request(get('/audit/conversations'), undefined, ADMIN);
+    expect(await response.json()).toEqual({
+      from: '2026-10-05T03:00:00.000Z',
+      to: '2026-10-12T03:00:00.000Z',
+      total: 2,
+      items: [
+        {
+          conversationId: conversation,
+          caller: { id: 'reader-1', email: 'reader@umccr.org', clientId: 'docs-app' },
+          // The exchange of 2026-09-01 is outside the window, so it is neither first nor counted.
+          startedAt: '2026-10-10T01:00:00.000Z',
+          lastAt: '2026-10-11T02:00:00.000Z',
+          firstQuestion: 'How do I add a site?',
+          questions: 3,
+          answered: 2,
+          notCovered: 0,
+          failed: 1,
+          sites: ['platform'],
+          inputTokens: 5100,
+          outputTokens: 410,
+          guardrailInterventions: 1,
+          costUsd: 0.03,
+        },
+        {
+          conversationId: `c_${'b'.repeat(32)}`,
+          caller: { id: 'reader-2', email: 'other@umccr.org', clientId: 'docs-app' },
+          startedAt: '2026-10-11T01:00:00.000Z',
+          lastAt: '2026-10-11T01:00:00.000Z',
+          firstQuestion: 'How do I add a site?',
+          questions: 1,
+          answered: 0,
+          notCovered: 1,
+          failed: 0,
+          sites: [],
+          inputTokens: 0,
+          outputTokens: 0,
+          guardrailInterventions: 0,
+          costUsd: 0.001,
+        },
+      ],
+    });
+    expect(deps.logs).toContainEqual({
+      outcome: 'audit-read',
+      viewer: 'admin-1',
+      route: 'conversations',
+      filtered: false,
+      count: 2,
+    });
+    expect(JSON.stringify(deps.logs)).not.toContain('add a site');
+  });
+
+  test('filters conversations by caller, by sub or by email in any case, and by an outcome they hold', async () => {
+    const { app } = seeded();
+    const page = async (query: string) =>
+      (await (
+        await app.request(get(`/audit/conversations?${query}`), undefined, ADMIN)
+      ).json()) as { total: number; items: Array<{ conversationId: string; answered: number }> };
+    const ids = async (query: string) =>
+      (await page(query)).items.map((item) => item.conversationId);
+    expect(await ids('caller=reader-2')).toEqual([`c_${'b'.repeat(32)}`]);
+    expect(await ids('caller=Reader%40UMCCR.org')).toEqual([conversation]);
+    expect(await ids('outcome=not-covered')).toEqual([`c_${'b'.repeat(32)}`]);
+    // A conversation with a failed exchange is listed whole, its answered one included.
+    const failed = await page('outcome=failed');
+    expect(failed.total).toBe(1);
+    expect(failed.items).toEqual([
+      expect.objectContaining({ conversationId: conversation, answered: 1 }),
+    ]);
+  });
+
+  test('pages through conversations with the cursor, which keeps the window', async () => {
+    const { app, deps } = seeded();
+    const later = createApp({ ...deps, clock: () => new Date('2026-10-20T00:00:00Z') });
+    const page = async (query: string, from = app) =>
+      (await (
+        await from.request(get(`/audit/conversations?${query}`), undefined, ADMIN)
+      ).json()) as {
+        from: string;
+        total: number;
+        items: Array<{ conversationId: string }>;
+        nextCursor?: string;
+      };
+    const first = await page('limit=1');
+    expect(first.total).toBe(2);
+    expect(first.items.map((item) => item.conversationId)).toEqual([conversation]);
+    const second = await page(`limit=1&cursor=${first.nextCursor}`, later);
+    expect(second.from).toBe(first.from);
+    expect(second.total).toBe(2);
+    expect(second.items.map((item) => item.conversationId)).toEqual([`c_${'b'.repeat(32)}`]);
+    expect(second.nextCursor).toBeUndefined();
+  });
+
+  test('refuses a cursor that another list made, in either direction', async () => {
+    const { app } = seeded();
+    const cursorOf = async (path: string) =>
+      (
+        (await (await app.request(get(`${path}?limit=1`), undefined, ADMIN)).json()) as {
+          nextCursor: string;
+        }
+      ).nextCursor;
+    const exchanges = await cursorOf('/audit/exchanges');
+    const conversations = await cursorOf('/audit/conversations');
+    for (const path of [
+      `/audit/conversations?cursor=${exchanges}`,
+      `/audit/exchanges?cursor=${conversations}`,
+    ]) {
+      const response = await app.request(get(path), undefined, ADMIN);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { code: 'invalid-request', message: 'cursor must be one a previous page returned.' },
+      });
+    }
+  });
+
+  test.each(['/audit/exchanges', '/audit/conversations'])(
+    '%s refuses a cursor whose window is wider than a query may ask for',
+    async (path) => {
+      const { app } = seeded();
+      const { nextCursor } = (await (
+        await app.request(get(`${path}?limit=1`), undefined, ADMIN)
+      ).json()) as { nextCursor: string };
+      const widened = withCursorWindow(nextCursor, { from: '2026-01-01T00:00:00.000Z' });
+      const response = await app.request(get(`${path}?cursor=${widened}`), undefined, ADMIN);
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { code: 'invalid-request', message: 'cursor must be one a previous page returned.' },
+      });
+    }
+  );
+});
+
+describe('chat history', () => {
+  const mine = `c_${'1'.repeat(32)}`;
+  const older = `c_${'2'.repeat(32)}`;
+  const theirs = `c_${'3'.repeat(32)}`;
+  const failedOnly = `c_${'4'.repeat(32)}`;
+  const ONBOARDING = {
+    ref: 1,
+    id: 'platform:onboarding',
+    title: 'Onboarding a repository',
+    url: 'https://docs.umccr.org/platform/onboarding/',
+    site: 'platform',
+    snippet: 'Add one entry to the site registry, then open a pull request.',
+    score: 0.82,
+  };
+  let next = 0;
+  const entry = (
+    fields: Partial<AuditEntry> & Pick<AuditEntry, 'at' | 'conversationId'>
+  ): AuditEntry => ({
+    exchangeId: `x_${String((next += 1)).padStart(32, '0')}`,
+    callerId: 'reader-1',
+    email: 'reader@umccr.org',
+    clientId: 'docs-app',
+    outcome: 'answered',
+    question: 'How do I add a site?',
+    answer: 'Add one entry to the site registry [1].',
+    sources: [ONBOARDING],
+    modelId: 'au.anthropic.claude-sonnet-5',
+    usage: { inputTokens: 5000, outputTokens: 400 },
+    costUsd: 0.02,
+    guardrail: 'none',
+    latencyMs: 4000,
+    ...fields,
+  });
+  const failure = {
+    outcome: 'failed',
+    errorCode: 'unavailable',
+    answer: undefined,
+    sources: undefined,
+    modelId: undefined,
+    usage: undefined,
+    costUsd: undefined,
+    guardrail: undefined,
+    latencyMs: undefined,
+  } as const;
+
+  /** The fake clock is 2026-10-12T03:00Z, so history reads from 2026-09-12T03:00Z. */
+  const seeded = () => {
+    const { app, deps } = setup();
+    deps.auditStore.entries.push(
+      entry({ conversationId: older, at: '2026-09-01T00:00:00.000Z', question: 'Too old' }),
+      entry({
+        conversationId: older,
+        at: '2026-10-01T00:00:00.000Z',
+        question: 'Where do docs go?',
+        // Saved before sources kept their number, title and site.
+        sources: [
+          {
+            id: 'platform:publishing',
+            url: 'https://docs.umccr.org/platform/publishing/',
+            score: 0.7,
+          },
+        ],
+      }),
+      entry({ conversationId: mine, at: '2026-10-10T01:00:00.000Z' }),
+      entry({
+        conversationId: mine,
+        at: '2026-10-10T01:05:00.000Z',
+        question: 'And publish it?',
+        ...failure,
+      }),
+      entry({
+        conversationId: mine,
+        at: '2026-10-10T01:06:00.000Z',
+        question: 'And publish it?',
+        outcome: 'not-covered',
+        answer: 'The documentation does not cover that.',
+        sources: [],
+        modelId: undefined,
+        usage: undefined,
+        costUsd: 0.001,
+      }),
+      entry({ conversationId: failedOnly, at: '2026-10-11T00:00:00.000Z', ...failure }),
+      entry({
+        conversationId: theirs,
+        at: '2026-10-11T05:00:00.000Z',
+        callerId: 'reader-2',
+        email: 'other@umccr.org',
+      })
+    );
+    return { app, deps };
+  };
+
+  const json = async (response: Response) => (await response.json()) as Record<string, unknown>;
+
+  test("lists the reader's own conversations of the last 30 days, most recently active first, and nothing about them", async () => {
+    const { app } = seeded();
+    const response = await app.request(get('/chat/history'), undefined, READER);
+    expect(response.status).toBe(200);
+    // Failed questions are left out, and with them a conversation that holds nothing else; another reader's
+    // conversation and anything older than 30 days are not read at all.
+    expect(await json(response)).toEqual({
+      items: [
+        {
+          conversationId: mine,
+          title: 'How do I add a site?',
+          startedAt: '2026-10-10T01:00:00.000Z',
+          lastAt: '2026-10-10T01:06:00.000Z',
+          questions: 2,
+        },
+        {
+          conversationId: older,
+          title: 'Where do docs go?',
+          startedAt: '2026-10-01T00:00:00.000Z',
+          lastAt: '2026-10-01T00:00:00.000Z',
+          questions: 1,
+        },
+      ],
+    });
+  });
+
+  test('pages through with the cursor, which keeps the window', async () => {
+    const { app, deps } = seeded();
+    const first = await json(await app.request(get('/chat/history?limit=1'), undefined, READER));
+    expect(first.items).toEqual([expect.objectContaining({ conversationId: mine })]);
+    // A follow-up after the first page would move the older conversation ahead of the cursor, and the next page would
+    // skip it; the cursor's window ends before the follow-up, so the next page lists it where it was.
+    deps.auditStore.entries.push(entry({ conversationId: older, at: '2026-10-15T00:00:00.000Z' }));
+    const later = createApp({ ...deps, clock: () => new Date('2026-10-16T00:00:00Z') });
+    const second = await json(
+      await later.request(
+        get(`/chat/history?limit=1&cursor=${String(first.nextCursor)}`),
+        undefined,
+        READER
+      )
+    );
+    expect(second).toEqual({
+      items: [
+        expect.objectContaining({ conversationId: older, lastAt: '2026-10-01T00:00:00.000Z' }),
+      ],
+    });
+  });
+
+  test('never reads back past 30 days, whatever window the cursor carries', async () => {
+    const { app, deps } = seeded();
+    const first = await json(await app.request(get('/chat/history?limit=1'), undefined, READER));
+    const cursor = String(first.nextCursor);
+    const page = async (from: typeof app, query: string) =>
+      json(await from.request(get(`/chat/history?${query}`), undefined, READER));
+
+    // Three weeks on, the older conversation is past its 30 days: the next page leaves it out, as showing it does.
+    const later = createApp({ ...deps, clock: () => new Date('2026-11-02T00:00:00Z') });
+    expect(await page(later, `limit=1&cursor=${cursor}`)).toEqual({ items: [] });
+    expect((await later.request(get(`/chat/history/${older}`), undefined, READER)).status).toBe(
+      404
+    );
+
+    // A cursor moved back by hand still reads only the last 30 days, so "Too old", of 2026-09-01, is not its title.
+    const moved = withCursorWindow(cursor, {
+      from: '2026-09-01T00:00:00.000Z',
+      to: '2026-10-01T00:00:00.000Z',
+    });
+    expect(await page(app, `cursor=${moved}`)).toEqual({
+      items: [expect.objectContaining({ conversationId: older, title: 'Where do docs go?' })],
+    });
+
+    // And one wider than 30 days is refused.
+    const widened = withCursorWindow(cursor, { from: '2026-01-01T00:00:00.000Z' });
+    const response = await app.request(get(`/chat/history?cursor=${widened}`), undefined, READER);
+    expect(response.status).toBe(400);
+  });
+
+  test("shows one of the reader's conversations oldest first, as they saw it, without what the audit log adds", async () => {
+    const { app, deps } = seeded();
+    const [asked, , notCovered] = deps.auditStore.entries.filter(
+      (item) => item.conversationId === mine
+    );
+    const response = await app.request(get(`/chat/history/${mine}`), undefined, READER);
+    expect(response.status).toBe(200);
+    expect(await json(response)).toEqual({
+      conversationId: mine,
+      exchanges: [
+        {
+          exchangeId: asked!.exchangeId,
+          at: '2026-10-10T01:00:00.000Z',
+          question: 'How do I add a site?',
+          answer: 'Add one entry to the site registry [1].',
+          citations: [ONBOARDING],
+        },
+        {
+          exchangeId: notCovered!.exchangeId,
+          at: '2026-10-10T01:06:00.000Z',
+          question: 'And publish it?',
+          answer: 'The documentation does not cover that.',
+          citations: [],
+        },
+      ],
+    });
+  });
+
+  test('shows citations saved before their numbers were kept as they were saved, and nothing past 30 days', async () => {
+    const { app } = seeded();
+    const body = await json(await app.request(get(`/chat/history/${older}`), undefined, READER));
+    // "Too old", of 2026-09-01, is past its 30 days but not yet deleted, as DynamoDB's expiry can lag.
+    expect(body.exchanges).toEqual([
+      expect.objectContaining({
+        question: 'Where do docs go?',
+        citations: [
+          {
+            id: 'platform:publishing',
+            url: 'https://docs.umccr.org/platform/publishing/',
+            score: 0.7,
+          },
+        ],
+      }),
+    ]);
+  });
+
+  test("refuses another reader's conversation, and says when history does not hold one", async () => {
+    const { app } = seeded();
+    const status = async (id: string) =>
+      (await app.request(get(`/chat/history/${id}`), undefined, READER)).status;
+    expect(await status(theirs)).toBe(403);
+    expect(await status(failedOnly)).toBe(404);
+    expect(await status(`c_${'f'.repeat(32)}`)).toBe(404);
+    expect(await status('nope')).toBe(400);
+  });
+
+  test.each(['/chat/history', `/chat/history/${mine}`])(
+    '%s needs a sign-in but not the audit group, and is never stored by the browser',
+    async (path) => {
+      const { deps } = seeded();
+      const app = createApp({ ...deps, auditGroup: undefined });
+      const response = await app.request(get(path), undefined, READER);
+      expect(response.status).toBe(200);
+      expect(response.headers.get('cache-control')).toBe('no-store');
+      expect((await app.request(get(path), undefined, {})).status).toBe(401);
+    }
+  );
+
+  test.each([
+    ['limit=0', 'limit'],
+    ['limit=500', 'limit'],
+    ['cursor=not-a-cursor', 'cursor must be one a previous page returned.'],
+  ])('refuses %s', async (query, message) => {
+    const { app } = seeded();
+    const response = await app.request(get(`/chat/history?${query}`), undefined, READER);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { code: 'invalid-request', message: expect.stringContaining(message) },
+    });
+  });
+
+  test('holds a question asked through /chat, with its citations as the reader was shown them', async () => {
+    const { app } = setup();
+    const asked = (await (
+      await app.request(post('/chat', { query: 'How do I add a site?' }), undefined, READER)
+    ).json()) as { conversationId: string; answer: string; citations: unknown[] };
+    const list = await json(await app.request(get('/chat/history'), undefined, READER));
+    expect(list.items).toEqual([
+      expect.objectContaining({ conversationId: asked.conversationId, questions: 1 }),
+    ]);
+    const conversation = await json(
+      await app.request(get(`/chat/history/${asked.conversationId}`), undefined, READER)
+    );
+    expect(asked.citations).toEqual([
+      expect.objectContaining({ ref: 1, title: 'Onboarding a repository' }),
+      expect.objectContaining({ ref: 2, title: 'Publishing contract' }),
+    ]);
+    expect(conversation.exchanges).toEqual([
+      expect.objectContaining({ answer: asked.answer, citations: asked.citations }),
+    ]);
   });
 });
 
