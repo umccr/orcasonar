@@ -6,18 +6,10 @@ import { z } from 'zod';
 import { ApiError, errorDetail, invalidRequest } from './lib/errors';
 import { newId } from './lib/ids';
 import type { Place } from './lib/pages';
+import { cursorWindow, FINGERPRINT, firstPage, pageAfter } from './lib/pages';
 import {
-  CONVERSATION_KEY,
-  conversationKey,
-  cursorWindow,
-  firstPlace,
-  pageAfter,
-} from './lib/pages';
-import {
-  AUDIT_CONVERSATION_KEY,
   AUDIT_CONVERSATION_ROW,
   AUDIT_WINDOW_DAYS,
-  auditConversationKey,
   auditConversationRow,
   auditConversations,
   auditExchange,
@@ -38,7 +30,7 @@ import {
 } from './services/history';
 import type { Retriever } from './services/retrieval';
 import { MAX_QUESTION_CHARACTERS, toSource } from './services/retrieval';
-import type { DocumentStore, RecordStore } from './services/stores';
+import type { AuditEntry, DocumentStore, RecordStore } from './services/stores';
 
 export interface AppDeps extends Omit<ChatDeps, 'budget' | 'answerer'> {
   readonly corsAllowOrigins: readonly string[];
@@ -102,8 +94,14 @@ const FeedbackBody = z.object({
 /** A UTC date, or an ISO time in UTC. */
 const Moment = z.union([z.iso.date(), z.iso.datetime()]).optional();
 
-/** Room in a cursor for the conversations it names, well inside the URL API Gateway accepts. */
+/**
+ * The longest cursor a query accepts, well inside the URL API Gateway accepts. A list cursor names at most a page of
+ * conversations, by fingerprint, so it never needs more than about 2,200.
+ */
 const MAX_CURSOR_CHARACTERS = 4000;
+
+/** The most a page holds. */
+const MAX_PAGE_ITEMS = 100;
 
 const AuditListQuery = z.object({
   from: Moment,
@@ -116,14 +114,14 @@ const AuditListQuery = z.object({
     .transform((caller) => caller.toLowerCase())
     .optional(),
   outcome: z.enum(['answered', 'not-covered', 'failed']).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_ITEMS).default(50),
   cursor: z.string().min(1).max(MAX_CURSOR_CHARACTERS).optional(),
 });
 
 const AuditUsageQuery = z.object({ from: Moment, to: Moment });
 
 const HistoryQuery = z.object({
-  limit: z.coerce.number().int().min(1).max(100).default(50),
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_ITEMS).default(50),
   cursor: z.string().min(1).max(MAX_CURSOR_CHARACTERS).optional(),
 });
 
@@ -134,15 +132,15 @@ const HistoryQuery = z.object({
 const PageCursor = z.object({ from: z.iso.datetime(), to: z.iso.datetime(), after: z.string() });
 
 /**
- * A page of a list built in memory carries its window, and its place in the list (`Place` in `lib/pages.ts`). `shown`
- * names only what was listed while active in the minutes before the first page, so it stays short.
+ * A page of a list built in memory carries its window, and its place in the list (`Place` in `lib/pages.ts`): at most
+ * the first page's items, by fingerprint.
  */
 const ListCursor = z.object({
   from: z.iso.datetime(),
   to: z.iso.datetime(),
   settled: z.iso.datetime(),
-  after: z.string().optional(),
-  shown: z.array(z.string()).max(100),
+  after: z.object({ lastAt: z.iso.datetime().optional(), id: z.string() }).optional(),
+  shown: z.array(z.string().regex(FINGERPRINT)).max(MAX_PAGE_ITEMS),
 });
 
 type Env = {
@@ -196,11 +194,14 @@ const fromPageCursor = (cursor: string, days: number) => {
   return { ...window, after: result.data.after };
 };
 
+/** A time as `toISOString` writes it, to compare with stored times as strings. */
+const iso = (time: string) => new Date(time).toISOString();
+
 /**
  * A list cursor's window and place. It is refused unless its window spans at most `days`, as the list's own window
- * may, and the key and the names it holds have the forms the list makes.
+ * may, and the item it reads on after has an ID of the form the list makes.
  */
-const fromListCursor = (cursor: string, limits: { days: number; key: RegExp; id: RegExp }) => {
+const fromListCursor = (cursor: string, limits: { days: number; id: RegExp }) => {
   const result = ListCursor.safeParse(decodeCursor(cursor));
   const window = result.success
     ? cursorWindow(result.data.from, result.data.to, limits.days)
@@ -208,16 +209,21 @@ const fromListCursor = (cursor: string, limits: { days: number; key: RegExp; id:
   if (
     !result.success ||
     !window ||
-    (result.data.after !== undefined && !limits.key.test(result.data.after)) ||
-    !result.data.shown.every((id) => limits.id.test(id))
+    (result.data.after !== undefined && !limits.id.test(result.data.after.id))
   ) {
     throw badCursor();
   }
   const { settled, after, shown } = result.data;
   const place: Place = {
-    // As `toISOString` writes it, to compare with stored times as strings.
-    settled: new Date(settled).toISOString(),
-    ...(after === undefined ? {} : { after }),
+    settled: iso(settled),
+    ...(after === undefined
+      ? {}
+      : {
+          after: {
+            ...(after.lastAt === undefined ? {} : { lastAt: iso(after.lastAt) }),
+            id: after.id,
+          },
+        }),
     shown,
   };
   return { window, place };
@@ -400,11 +406,7 @@ export const createApp = (deps: AppDeps) => {
     const cursor =
       query.cursor === undefined
         ? undefined
-        : fromListCursor(query.cursor, {
-            days: HISTORY_DAYS,
-            key: CONVERSATION_KEY,
-            id: CONVERSATION_ID,
-          });
+        : fromListCursor(query.cursor, { days: HISTORY_DAYS, id: CONVERSATION_ID });
     const now = deps.clock();
     const last30Days = historyWindow(now);
     // A later page keeps its cursor's window, but never reads back past 30 days, as one conversation does not: what is
@@ -422,16 +424,13 @@ export const createApp = (deps: AppDeps) => {
       return c.json({ items: [] });
     }
     const entries = await deps.audit.byCaller(caller.id, window.from, window.to);
-    const page = pageAfter(
-      entries,
-      {
-        build: historyConversations,
-        key: conversationKey,
-        id: (conversation) => conversation.conversationId,
-      },
-      cursor?.place ?? firstPlace(now),
-      query.limit
-    );
+    const list = {
+      build: historyConversations,
+      id: (conversation: { conversationId: string }) => conversation.conversationId,
+    };
+    const page = cursor
+      ? pageAfter(entries, list, cursor.place, query.limit)
+      : firstPage(entries, list, now, query.limit);
     noStore(c);
     return c.json({
       items: page.items,
@@ -544,24 +543,18 @@ export const createApp = (deps: AppDeps) => {
     const cursor =
       query.cursor === undefined
         ? undefined
-        : fromListCursor(query.cursor, {
-            days: AUDIT_WINDOW_DAYS,
-            key: AUDIT_CONVERSATION_KEY,
-            id: AUDIT_CONVERSATION_ROW,
-          });
+        : fromListCursor(query.cursor, { days: AUDIT_WINDOW_DAYS, id: AUDIT_CONVERSATION_ROW });
     const now = deps.clock();
     const window = cursor?.window ?? auditWindow(query.from, query.to, now);
-    const page = pageAfter(
-      await deps.audit.between(window.from, window.to),
-      {
-        build: (entries) =>
-          auditConversations(entries, { caller: query.caller, outcome: query.outcome }),
-        key: auditConversationKey,
-        id: auditConversationRow,
-      },
-      cursor?.place ?? firstPlace(now),
-      query.limit
-    );
+    const entries = await deps.audit.between(window.from, window.to);
+    const list = {
+      build: (exchanges: readonly AuditEntry[]) =>
+        auditConversations(exchanges, { caller: query.caller, outcome: query.outcome }),
+      id: auditConversationRow,
+    };
+    const page = cursor
+      ? pageAfter(entries, list, cursor.place, query.limit)
+      : firstPage(entries, list, now, query.limit);
     deps.log({
       outcome: 'audit-read',
       viewer: viewer.id,

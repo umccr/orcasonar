@@ -1055,6 +1055,45 @@ describe('audit log, read', () => {
     expect((await page('caller=reader-1')).items).toEqual([expect.objectContaining(ownerRow)]);
   });
 
+  test.each([50, 100])(
+    'pages through %s rows and more, all active in the minutes before the first page, with a cursor it accepts',
+    async (limit) => {
+      const { deps } = setup();
+      const hex = (n: number, width: number) => n.toString(16).padStart(width, '0');
+      // Cognito subs are UUIDs, the longest caller IDs; each row asked within the six minutes before 03:00, the
+      // newest with the lowest ID, so the cursor has to name every row of the first page.
+      const ids = Array.from({ length: limit + 1 }, (_, n) => `c_${hex(n, 32)}`);
+      deps.auditStore.entries.push(
+        ...ids.map((conversationId, n) =>
+          entry({
+            conversationId,
+            at: new Date(Date.parse('2026-10-12T02:55:00.000Z') + (limit - n) * 1000).toISOString(),
+            callerId: `${hex(n, 8)}-0000-4000-8000-${hex(n, 12)}`,
+          })
+        )
+      );
+      const app = createApp(deps);
+      const page = async (query: string) => {
+        const response = await app.request(get(`/audit/conversations?${query}`), undefined, ADMIN);
+        expect(response.status).toBe(200);
+        return (await response.json()) as {
+          items: Array<{ conversationId: string }>;
+          nextCursor?: string;
+        };
+      };
+      const first = await page(`limit=${limit}`);
+      const cursor = JSON.parse(Buffer.from(first.nextCursor!, 'base64url').toString()) as {
+        shown: string[];
+      };
+      expect(cursor.shown).toHaveLength(limit);
+      expect(first.nextCursor!.length).toBeLessThanOrEqual(limit === 100 ? 2300 : 1300);
+      const second = await page(`limit=${limit}&cursor=${first.nextCursor}`);
+      expect(second.nextCursor).toBeUndefined();
+      const listed = [...first.items, ...second.items].map((item) => item.conversationId);
+      expect(listed.sort()).toEqual([...ids].sort());
+    }
+  );
+
   test('pages through conversations with the cursor, which keeps the window', async () => {
     const { app, deps } = seeded();
     const later = createApp({ ...deps, clock: () => new Date('2026-10-20T00:00:00Z') });

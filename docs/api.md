@@ -108,8 +108,10 @@ Citations are the ones the reader was shown, and `[n]` in a saved answer cites t
 live one; answers saved before the whole citation was kept cite `{id, url, score}` only. A conversation shows only the
 reader's own exchanges. To continue a conversation, send its `conversationId` with the next question to `POST /chat`.
 For the next page of the list, pass `nextCursor` as `cursor`. The cursor keeps the first page's window, but a page
-never reaches back past 30 days. Each conversation is listed once across the pages, even one that a question asked
-before the first page, and saved once answered after it, makes more recent: it comes first on the next page.
+never reaches back past 30 days. Each conversation is listed once across the pages. A question asked before the first
+page is saved only once it is answered, up to five minutes later. If that makes a conversation the first page did not
+reach more recent, it is still listed where the first page would have put it. A conversation that first appears after
+the first page is on the next first page, as one started after it is.
 
 ## The audit log
 

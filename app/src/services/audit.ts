@@ -107,15 +107,11 @@ export const auditConversationRow = (row: { conversationId: string; caller: { id
 export const AUDIT_CONVERSATION_ROW = /^c_[0-9a-f]{32}#[^#\s]+$/;
 
 /** A row's key in the audit list of conversations: its conversation's key, then whose exchanges it holds. */
-export const auditConversationKey = (row: {
+const auditConversationKey = (row: {
   lastAt: string;
   conversationId: string;
   caller: { id: string };
 }) => `${conversationKey(row)}#${row.caller.id}`;
-
-/** What `auditConversationKey` makes, to check a cursor against before trusting it. */
-export const AUDIT_CONVERSATION_KEY =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z#c_[0-9a-f]{32}#[^#\s]+$/;
 
 /**
  * The window's exchanges as conversations, most recently active first: who asked, the first question, and what their
