@@ -97,9 +97,12 @@ export interface AuditStore {
   put(entry: AuditEntry): Promise<void>;
   /** A page of exchanges, newest first, with a cursor for the next when there may be more. */
   list(query: AuditQuery): Promise<{ items: AuditEntry[]; cursor?: string }>;
-  /** Every exchange between two ISO times, both included, newest first. */
+  /** Every exchange between two ISO times, both included, newest first. `from` after `to` throws, as DynamoDB does. */
   between(from: string, to: string): Promise<AuditEntry[]>;
-  /** Every exchange one caller asked, by Cognito `sub`, between two ISO times, both included, newest first. */
+  /**
+   * Every exchange one caller asked, by Cognito `sub`, between two ISO times, both included, newest first. `from` after
+   * `to` throws, as DynamoDB does.
+   */
   byCaller(callerId: string, from: string, to: string): Promise<CallerExchange[]>;
   /** A conversation's exchanges, oldest first. */
   conversation(conversationId: string): Promise<AuditEntry[]>;

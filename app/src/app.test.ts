@@ -996,6 +996,65 @@ describe('audit log, read', () => {
     ]);
   });
 
+  test("lists a follow-up refused for another reader as that reader's own row, apart from the owner's", async () => {
+    const { app, deps } = setup();
+    const { conversationId } = (await (
+      await app.request(post('/chat', { query: 'How do I add a site?' }), undefined, READER)
+    ).json()) as { conversationId: string };
+    // Refused an hour later, so it is the conversation's newest entry, the first a newest-first read meets.
+    const later = createApp({ ...deps, clock: () => new Date('2026-10-12T04:00:00Z') });
+    const other = {
+      requestContext: {
+        authorizer: { sub: 'reader-2', clientId: 'docs-app', email: 'other@umccr.org' },
+      },
+    };
+    const refused = await later.request(
+      post('/chat', { query: 'Mine now?', conversationId }),
+      undefined,
+      other
+    );
+    expect(refused.status).toBe(403);
+
+    const page = async (query: string) =>
+      (await (
+        await later.request(get(`/audit/conversations?${query}`), undefined, ADMIN)
+      ).json()) as { total: number; items: Array<Record<string, unknown>>; nextCursor?: string };
+    const refusedRow = {
+      conversationId,
+      caller: { id: 'reader-2', email: 'other@umccr.org', clientId: 'docs-app' },
+      firstQuestion: 'Mine now?',
+      questions: 1,
+      answered: 0,
+      failed: 1,
+      inputTokens: 0,
+      outputTokens: 0,
+      costUsd: 0,
+    };
+    const ownerRow = {
+      conversationId,
+      caller: { id: 'reader-1', clientId: 'docs-app' },
+      firstQuestion: 'How do I add a site?',
+      questions: 1,
+      answered: 1,
+      failed: 0,
+      inputTokens: 4920,
+      outputTokens: 388,
+    };
+    const all = await page('');
+    expect(all.total).toBe(2);
+    expect(all.items).toEqual([
+      expect.objectContaining(refusedRow),
+      expect.objectContaining(ownerRow),
+    ]);
+    // Each row has its own place, so paging one at a time neither repeats nor skips either.
+    const first = await page('limit=1');
+    expect(first.items).toEqual([expect.objectContaining(refusedRow)]);
+    const second = await page(`limit=1&cursor=${String(first.nextCursor)}`);
+    expect(second.items).toEqual([expect.objectContaining(ownerRow)]);
+    expect(second.nextCursor).toBeUndefined();
+    expect((await page('caller=reader-1')).items).toEqual([expect.objectContaining(ownerRow)]);
+  });
+
   test('pages through conversations with the cursor, which keeps the window', async () => {
     const { app, deps } = seeded();
     const later = createApp({ ...deps, clock: () => new Date('2026-10-20T00:00:00Z') });
@@ -1226,6 +1285,47 @@ describe('chat history', () => {
     const widened = withCursorWindow(cursor, { from: '2026-01-01T00:00:00.000Z' });
     const response = await app.request(get(`/chat/history?cursor=${widened}`), undefined, READER);
     expect(response.status).toBe(400);
+  });
+
+  test('answers an empty page for a cursor whose whole window has since expired', async () => {
+    const { app, deps } = seeded();
+    const first = await json(await app.request(get('/chat/history?limit=1'), undefined, READER));
+    // The first page's window ends at 2026-10-12T03:00Z; a month and a day on, all of it is past its 30 days.
+    const later = createApp({ ...deps, clock: () => new Date('2026-11-12T04:00:00Z') });
+    const response = await later.request(
+      get(`/chat/history?limit=1&cursor=${String(first.nextCursor)}`),
+      undefined,
+      READER
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get('cache-control')).toBe('no-store');
+    expect(await json(response)).toEqual({ items: [] });
+  });
+
+  test('still shows its owner a conversation another reader was refused a follow-up in, and still refuses them', async () => {
+    const { app } = setup();
+    const { conversationId } = (await (
+      await app.request(post('/chat', { query: 'How do I add a site?' }), undefined, READER)
+    ).json()) as { conversationId: string };
+    const other = { requestContext: { authorizer: { sub: 'reader-2', clientId: 'docs-app' } } };
+    const refused = await app.request(
+      post('/chat', { query: 'Mine now?', conversationId }),
+      undefined,
+      other
+    );
+    expect(refused.status).toBe(403);
+
+    const owner = await app.request(get(`/chat/history/${conversationId}`), undefined, READER);
+    expect(owner.status).toBe(200);
+    expect((await json(owner)).exchanges).toEqual([
+      expect.objectContaining({ question: 'How do I add a site?' }),
+    ]);
+    expect(
+      (await app.request(get(`/chat/history/${conversationId}`), undefined, other)).status
+    ).toBe(403);
+    expect(await json(await app.request(get('/chat/history'), undefined, other))).toEqual({
+      items: [],
+    });
   });
 
   test("shows one of the reader's conversations oldest first, as they saw it, without what the audit log adds", async () => {

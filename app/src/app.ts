@@ -7,7 +7,9 @@ import { ApiError, errorDetail, invalidRequest } from './lib/errors';
 import { newId } from './lib/ids';
 import { CONVERSATION_KEY, conversationKey, cursorWindow, pageAfter } from './lib/pages';
 import {
+  AUDIT_CONVERSATION_KEY,
   AUDIT_WINDOW_DAYS,
+  auditConversationKey,
   auditConversations,
   auditExchange,
   auditRow,
@@ -355,6 +357,12 @@ export const createApp = (deps: AppDeps) => {
     const window = cursor
       ? { from: cursor.from > last30Days.from ? cursor.from : last30Days.from, to: cursor.to }
       : last30Days;
+    // A cursor whose whole window has since expired has nothing left to read, and DynamoDB refuses a window that ends
+    // before it starts.
+    if (window.from > window.to) {
+      noStore(c);
+      return c.json({ items: [] });
+    }
     const entries = await deps.audit.byCaller(caller.id, window.from, window.to);
     const page = pageAfter(
       historyConversations(entries),
@@ -369,7 +377,11 @@ export const createApp = (deps: AppDeps) => {
     });
   });
 
-  /** One of the caller's own conversations, oldest first; another reader's is refused, as for a follow-up. */
+  /**
+   * One of the caller's own conversations, oldest first; another reader's is refused, as for a follow-up. Whose it is
+   * goes by the exchanges history shows, which only the owner can have: a follow-up refused because the conversation
+   * was someone else's is kept under it, failed, with the caller who sent it, and does not lock the owner out.
+   */
   app.get('/chat/history/:conversationId', async (c) => {
     const caller = callerFrom(c, deps.devCaller);
     const conversationId = validated(
@@ -378,7 +390,7 @@ export const createApp = (deps: AppDeps) => {
       'conversationId'
     );
     const entries = await deps.audit.conversation(conversationId);
-    if (entries.some((entry) => entry.callerId !== caller.id)) {
+    if (shownInHistory(entries).some((entry) => entry.callerId !== caller.id)) {
       throw new ApiError(403, 'forbidden', 'That conversation belongs to someone else.');
     }
     const shown = shownInHistory(entries, historyWindow(deps.clock()).from);
@@ -459,8 +471,8 @@ export const createApp = (deps: AppDeps) => {
   });
 
   /**
-   * The audit log grouped by conversation. Like usage, it reads the whole window, which the budget keeps small, and
-   * groups and pages it here; `total` counts every conversation that matches, across pages.
+   * The audit log grouped by conversation, a row for each caller in it. Like usage, it reads the whole window, which
+   * the budget keeps small, and groups and pages it here; `total` counts every row that matches, across pages.
    */
   app.get('/audit/conversations', async (c) => {
     const viewer = auditorFrom(c);
@@ -468,7 +480,10 @@ export const createApp = (deps: AppDeps) => {
     const cursor =
       query.cursor === undefined
         ? undefined
-        : fromPageCursor(query.cursor, { days: AUDIT_WINDOW_DAYS, after: CONVERSATION_KEY });
+        : fromPageCursor(query.cursor, {
+            days: AUDIT_WINDOW_DAYS,
+            after: AUDIT_CONVERSATION_KEY,
+          });
     const window = cursor
       ? { from: cursor.from, to: cursor.to }
       : auditWindow(query.from, query.to, deps.clock());
@@ -476,7 +491,7 @@ export const createApp = (deps: AppDeps) => {
       caller: query.caller,
       outcome: query.outcome,
     });
-    const page = pageAfter(conversations, conversationKey, cursor?.after, query.limit);
+    const page = pageAfter(conversations, auditConversationKey, cursor?.after, query.limit);
     deps.log({
       outcome: 'audit-read',
       viewer: viewer.id,

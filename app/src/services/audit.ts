@@ -97,10 +97,27 @@ const OUTCOME_COUNTS = {
 } as const satisfies Record<AuditOutcome, string>;
 
 /**
- * The window's exchanges as conversations, most recently active first: who asked, the first question, and what its
- * exchanges in the window add up to. A conversation that began before the window counts only the exchanges inside it;
- * `/audit/conversations/{conversationId}` has all of it. `caller` keeps one reader's, by `sub` or lower-cased email,
- * and `outcome` those with at least one exchange that ended that way.
+ * A row's key in the audit list of conversations: its conversation's key, then whose exchanges it holds, since one
+ * conversation can have a row for each caller.
+ */
+export const auditConversationKey = (row: {
+  lastAt: string;
+  conversationId: string;
+  caller: { id: string };
+}) => `${conversationKey(row)}#${row.caller.id}`;
+
+/** What `auditConversationKey` makes, to check a cursor against before trusting it. */
+export const AUDIT_CONVERSATION_KEY =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z#c_[0-9a-f]{32}#[^#\s]+$/;
+
+/**
+ * The window's exchanges as conversations, most recently active first: who asked, the first question, and what their
+ * exchanges in the window add up to. Each row is one caller's exchanges in one conversation. Only its owner can
+ * continue a conversation, but a follow-up refused for that reason is kept under the conversation it named, with the
+ * caller who sent it; it is that caller's own row, and never names or adds to the owner's. A conversation that began
+ * before the window counts only the exchanges inside it; `/audit/conversations/{conversationId}` has all of it.
+ * `caller` keeps one reader's, by `sub` or lower-cased email, and `outcome` those with at least one exchange that
+ * ended that way.
  */
 export const auditConversations = (
   entries: readonly AuditEntry[],
@@ -131,7 +148,8 @@ export const auditConversations = (
     if (filter.caller && entry.callerId !== filter.caller && entry.email !== filter.caller) {
       continue;
     }
-    let conversation = conversations.get(entry.conversationId);
+    const key = `${entry.conversationId}#${entry.callerId}`;
+    let conversation = conversations.get(key);
     if (!conversation) {
       conversation = {
         conversationId: entry.conversationId,
@@ -151,7 +169,7 @@ export const auditConversations = (
         outputTokens: 0,
         guardrailInterventions: 0,
       };
-      conversations.set(entry.conversationId, conversation);
+      conversations.set(key, conversation);
     }
     conversation.email ??= entry.email;
     if (entry.at < conversation.startedAt) {
@@ -184,7 +202,7 @@ export const auditConversations = (
       ...conversation,
       costUsd: dollars(costUsd),
     }))
-    .sort(byKeyDescending(conversationKey));
+    .sort(byKeyDescending(auditConversationKey));
 };
 
 /** What each caller asked and spent, most questions first, and the totals. */

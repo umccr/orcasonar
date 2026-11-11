@@ -110,6 +110,15 @@ export class MemoryAuditStore implements AuditStore {
   }
 
   async between(from: string, to: string): Promise<AuditEntry[]> {
+    // As DynamoDB refuses a `BETWEEN` whose bounds are the wrong way round, rather than finding nothing.
+    if (from > to) {
+      throw Object.assign(
+        new Error(
+          'Invalid KeyConditionExpression: The BETWEEN operator requires upper bound to be greater than or equal to lower bound'
+        ),
+        { name: 'ValidationException' }
+      );
+    }
     return this.entries
       .filter((entry) => entry.at >= from && entry.at <= to)
       .sort((a, b) => b.at.localeCompare(a.at));
