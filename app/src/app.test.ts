@@ -1287,6 +1287,73 @@ describe('chat history', () => {
     expect(response.status).toBe(400);
   });
 
+  test('lists a conversation the first page did not reach, though a follow-up asked before it is saved after it', async () => {
+    const { app, deps } = seeded();
+    const first = await json(await app.request(get('/chat/history?limit=1'), undefined, READER));
+    expect(first.items).toEqual([expect.objectContaining({ conversationId: mine })]);
+    // Asked at 02:58, two minutes before the first page, and saved once answered, after it; and one in the
+    // conversation the first page listed, which is not listed again.
+    deps.auditStore.entries.push(
+      entry({ conversationId: older, at: '2026-10-12T02:58:00.000Z' }),
+      entry({ conversationId: mine, at: '2026-10-12T02:59:00.000Z' })
+    );
+    const later = createApp({ ...deps, clock: () => new Date('2026-10-12T03:02:00Z') });
+    const second = await json(
+      await later.request(
+        get(`/chat/history?limit=1&cursor=${String(first.nextCursor)}`),
+        undefined,
+        READER
+      )
+    );
+    expect(second).toEqual({
+      items: [
+        expect.objectContaining({ conversationId: older, lastAt: '2026-10-12T02:58:00.000Z' }),
+      ],
+    });
+  });
+
+  test('shows each reader only their own exchanges where a lost first turn let two readers share a conversation', async () => {
+    const { app, deps } = setup();
+    const save = deps.conversationStore.append.bind(deps.conversationStore);
+    let failed = false;
+    // The first turn is not saved, so a follow-up finds no owner to check; its audit entry is.
+    deps.conversationStore.append = async (...args) => {
+      if (!failed) {
+        failed = true;
+        throw new Error('table unavailable');
+      }
+      return save(...args);
+    };
+    const { conversationId } = (await (
+      await app.request(post('/chat', { query: 'How do I add a site?' }), undefined, READER)
+    ).json()) as { conversationId: string };
+    const other = { requestContext: { authorizer: { sub: 'reader-2', clientId: 'docs-app' } } };
+    const followUp = await app.request(
+      post('/chat', { query: 'And publish it?', conversationId }),
+      undefined,
+      other
+    );
+    expect(followUp.status).toBe(200);
+
+    const questions = async (context: typeof READER) => {
+      const response = await app.request(
+        get(`/chat/history/${conversationId}`),
+        undefined,
+        context
+      );
+      expect(response.status).toBe(200);
+      return ((await json(response)).exchanges as Array<{ question: string }>).map(
+        (exchange) => exchange.question
+      );
+    };
+    expect(await questions(READER)).toEqual(['How do I add a site?']);
+    expect(await questions(other)).toEqual(['And publish it?']);
+    const third = { requestContext: { authorizer: { sub: 'reader-3', clientId: 'docs-app' } } };
+    expect(
+      (await app.request(get(`/chat/history/${conversationId}`), undefined, third)).status
+    ).toBe(403);
+  });
+
   test('answers an empty page for a cursor whose whole window has since expired', async () => {
     const { app, deps } = seeded();
     const first = await json(await app.request(get('/chat/history?limit=1'), undefined, READER));

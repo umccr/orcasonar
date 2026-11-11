@@ -105,9 +105,11 @@ from the turns a follow-up sends the model.
 | `GET /chat/history/{conversationId}` |                                            | `{conversationId, exchanges: [{exchangeId, at, question, sites?, answer, citations: [{ref, id, title, url, site, snippet, score}]}]}`, oldest first; `403` for another reader's, `404` for one it lacks |
 
 Citations are the ones the reader was shown, and `[n]` in a saved answer cites the citation whose `ref` is n, as in a
-live one; answers saved before the whole citation was kept cite `{id, url, score}` only. To continue a conversation,
-send its `conversationId` with the next question to `POST /chat`. For the next page of the list, pass `nextCursor` as
-`cursor`. The cursor keeps the first page's window, but a page never reaches back past 30 days.
+live one; answers saved before the whole citation was kept cite `{id, url, score}` only. A conversation shows only the
+reader's own exchanges. To continue a conversation, send its `conversationId` with the next question to `POST /chat`.
+For the next page of the list, pass `nextCursor` as `cursor`. The cursor keeps the first page's window, but a page
+never reaches back past 30 days. Each conversation is listed once across the pages, even one that a question asked
+before the first page, and saved once answered after it, makes more recent: it comes first on the next page.
 
 ## The audit log
 
@@ -132,11 +134,14 @@ with the same `caller`, `outcome` and `limit`. The cursor keeps the first page's
 
 An exchange is one question and its answer (`x_…`). A conversation (`c_…`) is the exchanges one reader asked as
 follow-ups of each other: the first question starts it, and each follow-up sends its `conversationId`.
-`/audit/conversations` lists the window's conversations, most recently active first, with what their exchanges in the
-window add up to; a conversation that began before the window counts only the exchanges inside it, and
-`/audit/conversations/{conversationId}` has all of it. There, `outcome` keeps the conversations with at least one
-exchange that ended that way, and `total` counts every conversation that matches, across pages. Sources are the
-citations the reader was shown, from the day the whole citation was first kept; older ones carry `{id, url, score}`.
+`/audit/conversations` lists the window's conversations, most recently active first, a row for each caller in one, with
+what their exchanges in the window add up to. Only its owner can continue a conversation, so another caller's row in
+it holds follow-ups that were refused (`failed`, with `errorCode` `forbidden`), and never adds to the owner's. A
+conversation that began before the window counts only the exchanges inside it, and
+`/audit/conversations/{conversationId}` has all of it. There, `outcome` keeps the rows with at least one exchange that
+ended that way, and `total` counts every row that matches, across pages; paging lists each row once, as for history.
+Sources are the citations the reader was shown, from the day the whole citation was first kept; older ones carry
+`{id, url, score}`.
 
 ```http
 GET /api/v1/audit/exchanges?caller=someone%40umccr.org&limit=20 HTTP/1.1

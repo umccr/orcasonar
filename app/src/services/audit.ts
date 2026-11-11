@@ -97,9 +97,16 @@ const OUTCOME_COUNTS = {
 } as const satisfies Record<AuditOutcome, string>;
 
 /**
- * A row's key in the audit list of conversations: its conversation's key, then whose exchanges it holds, since one
+ * A row's name in the audit list of conversations: its conversation, then whose exchanges it holds, since one
  * conversation can have a row for each caller.
  */
+export const auditConversationRow = (row: { conversationId: string; caller: { id: string } }) =>
+  `${row.conversationId}#${row.caller.id}`;
+
+/** What `auditConversationRow` makes, to check a cursor against before trusting it. */
+export const AUDIT_CONVERSATION_ROW = /^c_[0-9a-f]{32}#[^#\s]+$/;
+
+/** A row's key in the audit list of conversations: its conversation's key, then whose exchanges it holds. */
 export const auditConversationKey = (row: {
   lastAt: string;
   conversationId: string;

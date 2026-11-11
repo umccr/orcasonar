@@ -72,9 +72,10 @@ paths:
     get:
       summary: One of your conversations, oldest first
       description: |
-        The questions and answers of one of the reader's own conversations, with the pages each answer cited, to show
-        it again; `POST /chat` with its `conversationId` continues it. Questions that failed are left out. Another
-        reader's conversation is `403`, as it is for a follow-up; one that history does not hold is `404`.
+        The reader's own questions and answers in one of their conversations, with the pages each answer cited, to
+        show it again; `POST /chat` with its `conversationId` continues it. Questions that failed are left out, and so
+        is anything another reader asked in it. Another reader's conversation is `403`, as it is for a follow-up; one
+        that history does not hold is `404`.
       parameters:
         - { $ref: '#/components/parameters/ConversationId' }
       responses:

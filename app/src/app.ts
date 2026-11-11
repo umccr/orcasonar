@@ -5,11 +5,20 @@ import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { ApiError, errorDetail, invalidRequest } from './lib/errors';
 import { newId } from './lib/ids';
-import { CONVERSATION_KEY, conversationKey, cursorWindow, pageAfter } from './lib/pages';
+import type { Place } from './lib/pages';
+import {
+  CONVERSATION_KEY,
+  conversationKey,
+  cursorWindow,
+  firstPlace,
+  pageAfter,
+} from './lib/pages';
 import {
   AUDIT_CONVERSATION_KEY,
+  AUDIT_CONVERSATION_ROW,
   AUDIT_WINDOW_DAYS,
   auditConversationKey,
+  auditConversationRow,
   auditConversations,
   auditExchange,
   auditRow,
@@ -68,7 +77,8 @@ export const ROUTES = [
 
 const SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const Sites = z.array(z.string().regex(SLUG)).min(1).max(20).optional();
-const ConversationId = z.string().regex(/^c_[0-9a-f]{32}$/);
+const CONVERSATION_ID = /^c_[0-9a-f]{32}$/;
+const ConversationId = z.string().regex(CONVERSATION_ID);
 
 const ChatBody = z.object({
   query: z.string().trim().min(1).max(MAX_QUESTION_CHARACTERS),
@@ -92,6 +102,9 @@ const FeedbackBody = z.object({
 /** A UTC date, or an ISO time in UTC. */
 const Moment = z.union([z.iso.date(), z.iso.datetime()]).optional();
 
+/** Room in a cursor for the conversations it names, well inside the URL API Gateway accepts. */
+const MAX_CURSOR_CHARACTERS = 4000;
+
 const AuditListQuery = z.object({
   from: Moment,
   to: Moment,
@@ -104,21 +117,33 @@ const AuditListQuery = z.object({
     .optional(),
   outcome: z.enum(['answered', 'not-covered', 'failed']).optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
-  cursor: z.string().min(1).max(2000).optional(),
+  cursor: z.string().min(1).max(MAX_CURSOR_CHARACTERS).optional(),
 });
 
 const AuditUsageQuery = z.object({ from: Moment, to: Moment });
 
 const HistoryQuery = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(50),
-  cursor: z.string().min(1).max(2000).optional(),
+  cursor: z.string().min(1).max(MAX_CURSOR_CHARACTERS).optional(),
 });
 
 /**
- * A page of a list carries its window, so the next page reads the same one even when `to` defaulted to now, and where
- * the last page stopped.
+ * A page of `/audit/exchanges` carries its window, so the next page reads the same one even when `to` defaulted to
+ * now, and where DynamoDB stopped.
  */
 const PageCursor = z.object({ from: z.iso.datetime(), to: z.iso.datetime(), after: z.string() });
+
+/**
+ * A page of a list built in memory carries its window, and its place in the list (`Place` in `lib/pages.ts`). `shown`
+ * names only what was listed while active in the minutes before the first page, so it stays short.
+ */
+const ListCursor = z.object({
+  from: z.iso.datetime(),
+  to: z.iso.datetime(),
+  settled: z.iso.datetime(),
+  after: z.string().optional(),
+  shown: z.array(z.string()).max(100),
+});
 
 type Env = {
   Bindings: {
@@ -149,28 +174,53 @@ const parseBody = async <T>(c: Context<Env>, schema: z.ZodType<T>): Promise<T> =
   return validated(schema, body, 'body');
 };
 
-const pageCursor = (window: { from: string; to: string }, after: string) =>
-  Buffer.from(JSON.stringify({ ...window, after })).toString('base64url');
+const encodeCursor = (cursor: object) => Buffer.from(JSON.stringify(cursor)).toString('base64url');
+
+const decodeCursor = (cursor: string): unknown => {
+  try {
+    return JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    return undefined;
+  }
+};
+
+const badCursor = () => invalidRequest('cursor must be one a previous page returned.');
+
+/** An `/audit/exchanges` cursor's window and place, refused unless its window spans at most `days`. */
+const fromPageCursor = (cursor: string, days: number) => {
+  const result = PageCursor.safeParse(decodeCursor(cursor));
+  const window = result.success ? cursorWindow(result.data.from, result.data.to, days) : undefined;
+  if (!result.success || !window) {
+    throw badCursor();
+  }
+  return { ...window, after: result.data.after };
+};
 
 /**
- * The cursor's window and place. It is refused unless its window spans at most `days`, as a list's own window may, and,
- * when `after` is given, unless the place has the form it must take.
+ * A list cursor's window and place. It is refused unless its window spans at most `days`, as the list's own window
+ * may, and the key and the names it holds have the forms the list makes.
  */
-const fromPageCursor = (cursor: string, limits: { days: number; after?: RegExp }) => {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
-  } catch {
-    parsed = undefined;
-  }
-  const result = PageCursor.safeParse(parsed);
+const fromListCursor = (cursor: string, limits: { days: number; key: RegExp; id: RegExp }) => {
+  const result = ListCursor.safeParse(decodeCursor(cursor));
   const window = result.success
     ? cursorWindow(result.data.from, result.data.to, limits.days)
     : undefined;
-  if (!result.success || !window || (limits.after && !limits.after.test(result.data.after))) {
-    throw invalidRequest('cursor must be one a previous page returned.');
+  if (
+    !result.success ||
+    !window ||
+    (result.data.after !== undefined && !limits.key.test(result.data.after)) ||
+    !result.data.shown.every((id) => limits.id.test(id))
+  ) {
+    throw badCursor();
   }
-  return { ...window, after: result.data.after };
+  const { settled, after, shown } = result.data;
+  const place: Place = {
+    // As `toISOString` writes it, to compare with stored times as strings.
+    settled: new Date(settled).toISOString(),
+    ...(after === undefined ? {} : { after }),
+    shown,
+  };
+  return { window, place };
 };
 
 /**
@@ -350,12 +400,20 @@ export const createApp = (deps: AppDeps) => {
     const cursor =
       query.cursor === undefined
         ? undefined
-        : fromPageCursor(query.cursor, { days: HISTORY_DAYS, after: CONVERSATION_KEY });
-    const last30Days = historyWindow(deps.clock());
+        : fromListCursor(query.cursor, {
+            days: HISTORY_DAYS,
+            key: CONVERSATION_KEY,
+            id: CONVERSATION_ID,
+          });
+    const now = deps.clock();
+    const last30Days = historyWindow(now);
     // A later page keeps its cursor's window, but never reads back past 30 days, as one conversation does not: what is
     // older is expired, and a cursor is not signed.
     const window = cursor
-      ? { from: cursor.from > last30Days.from ? cursor.from : last30Days.from, to: cursor.to }
+      ? {
+          from: cursor.window.from > last30Days.from ? cursor.window.from : last30Days.from,
+          to: cursor.window.to,
+        }
       : last30Days;
     // A cursor whose whole window has since expired has nothing left to read, and DynamoDB refuses a window that ends
     // before it starts.
@@ -365,22 +423,28 @@ export const createApp = (deps: AppDeps) => {
     }
     const entries = await deps.audit.byCaller(caller.id, window.from, window.to);
     const page = pageAfter(
-      historyConversations(entries),
-      conversationKey,
-      cursor?.after,
+      entries,
+      {
+        build: historyConversations,
+        key: conversationKey,
+        id: (conversation) => conversation.conversationId,
+      },
+      cursor?.place ?? firstPlace(now),
       query.limit
     );
     noStore(c);
     return c.json({
       items: page.items,
-      nextCursor: page.after === undefined ? undefined : pageCursor(window, page.after),
+      nextCursor: page.next && encodeCursor({ ...window, ...page.next }),
     });
   });
 
   /**
-   * One of the caller's own conversations, oldest first; another reader's is refused, as for a follow-up. Whose it is
-   * goes by the exchanges history shows, which only the owner can have: a follow-up refused because the conversation
-   * was someone else's is kept under it, failed, with the caller who sent it, and does not lock the owner out.
+   * The caller's own exchanges in one of their conversations, oldest first, as the list counts them; a conversation
+   * with exchanges history shows, none of them the caller's, is refused, as for a follow-up. A follow-up refused because
+   * the conversation was someone else's is kept under it, failed, with the caller who sent it. And where the first
+   * turn could not be saved, a follow-up has no owner to check against, so a conversation can hold exchanges that two
+   * readers saw; each is shown only their own.
    */
   app.get('/chat/history/:conversationId', async (c) => {
     const caller = callerFrom(c, deps.devCaller);
@@ -389,11 +453,12 @@ export const createApp = (deps: AppDeps) => {
       c.req.param('conversationId'),
       'conversationId'
     );
-    const entries = await deps.audit.conversation(conversationId);
-    if (shownInHistory(entries).some((entry) => entry.callerId !== caller.id)) {
+    const exchanges = shownInHistory(await deps.audit.conversation(conversationId));
+    const own = exchanges.filter((entry) => entry.callerId === caller.id);
+    if (own.length === 0 && exchanges.length > 0) {
       throw new ApiError(403, 'forbidden', 'That conversation belongs to someone else.');
     }
-    const shown = shownInHistory(entries, historyWindow(deps.clock()).from);
+    const shown = shownInHistory(own, historyWindow(deps.clock()).from);
     if (shown.length === 0) {
       throw new ApiError(404, 'not-found', 'Your history has no such conversation.');
     }
@@ -442,9 +507,7 @@ export const createApp = (deps: AppDeps) => {
     const viewer = auditorFrom(c);
     const query = validated(AuditListQuery, c.req.query(), 'query');
     const cursor =
-      query.cursor === undefined
-        ? undefined
-        : fromPageCursor(query.cursor, { days: AUDIT_WINDOW_DAYS });
+      query.cursor === undefined ? undefined : fromPageCursor(query.cursor, AUDIT_WINDOW_DAYS);
     const window = cursor
       ? { from: cursor.from, to: cursor.to }
       : auditWindow(query.from, query.to, deps.clock());
@@ -466,7 +529,8 @@ export const createApp = (deps: AppDeps) => {
     return c.json({
       ...window,
       items: page.items.map(auditRow),
-      nextCursor: page.cursor === undefined ? undefined : pageCursor(window, page.cursor),
+      nextCursor:
+        page.cursor === undefined ? undefined : encodeCursor({ ...window, after: page.cursor }),
     });
   });
 
@@ -480,18 +544,24 @@ export const createApp = (deps: AppDeps) => {
     const cursor =
       query.cursor === undefined
         ? undefined
-        : fromPageCursor(query.cursor, {
+        : fromListCursor(query.cursor, {
             days: AUDIT_WINDOW_DAYS,
-            after: AUDIT_CONVERSATION_KEY,
+            key: AUDIT_CONVERSATION_KEY,
+            id: AUDIT_CONVERSATION_ROW,
           });
-    const window = cursor
-      ? { from: cursor.from, to: cursor.to }
-      : auditWindow(query.from, query.to, deps.clock());
-    const conversations = auditConversations(await deps.audit.between(window.from, window.to), {
-      caller: query.caller,
-      outcome: query.outcome,
-    });
-    const page = pageAfter(conversations, auditConversationKey, cursor?.after, query.limit);
+    const now = deps.clock();
+    const window = cursor?.window ?? auditWindow(query.from, query.to, now);
+    const page = pageAfter(
+      await deps.audit.between(window.from, window.to),
+      {
+        build: (entries) =>
+          auditConversations(entries, { caller: query.caller, outcome: query.outcome }),
+        key: auditConversationKey,
+        id: auditConversationRow,
+      },
+      cursor?.place ?? firstPlace(now),
+      query.limit
+    );
     deps.log({
       outcome: 'audit-read',
       viewer: viewer.id,
@@ -502,9 +572,9 @@ export const createApp = (deps: AppDeps) => {
     noStore(c);
     return c.json({
       ...window,
-      total: conversations.length,
+      total: page.total,
       items: page.items,
-      nextCursor: page.after === undefined ? undefined : pageCursor(window, page.after),
+      nextCursor: page.next && encodeCursor({ ...window, ...page.next }),
     });
   });
 
