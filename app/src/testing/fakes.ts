@@ -9,6 +9,7 @@ import type {
   AuditEntry,
   AuditQuery,
   AuditStore,
+  CallerExchange,
   ConversationStore,
   DocumentStore,
   DocumentView,
@@ -109,9 +110,31 @@ export class MemoryAuditStore implements AuditStore {
   }
 
   async between(from: string, to: string): Promise<AuditEntry[]> {
+    // As DynamoDB refuses a `BETWEEN` whose bounds are the wrong way round, rather than finding nothing.
+    if (from > to) {
+      throw Object.assign(
+        new Error(
+          'Invalid KeyConditionExpression: The BETWEEN operator requires upper bound to be greater than or equal to lower bound'
+        ),
+        { name: 'ValidationException' }
+      );
+    }
     return this.entries
       .filter((entry) => entry.at >= from && entry.at <= to)
       .sort((a, b) => b.at.localeCompare(a.at));
+  }
+
+  /** Only what the index by caller holds, as DynamoDB returns it. */
+  async byCaller(callerId: string, from: string, to: string): Promise<CallerExchange[]> {
+    return (await this.between(from, to))
+      .filter((entry) => entry.callerId === callerId)
+      .map(({ at, conversationId, question, outcome }) => ({
+        callerId,
+        at,
+        conversationId,
+        question,
+        outcome,
+      }));
   }
 
   async conversation(conversationId: string): Promise<AuditEntry[]> {

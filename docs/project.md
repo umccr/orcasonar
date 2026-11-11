@@ -31,13 +31,13 @@ for personal data about patients, and its grounding check flags answers the pass
 
 ## Release 1, and what comes later
 
-|             | Release 1                                                                                                           | Later, each when someone needs it                                                                                        |
-| ----------- | ------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
-| Callers     | the docs chat panel and OrcaUI: ID tokens from the `docs-app` and OrcaUI Cognito clients                            | other portal apps; a machine client, and AgentCore Gateway to offer the API to AI agents as MCP tools                    |
-| Sources     | the UMCCR documentation docs.umccr.org exports, in one data source, `docs`                                          | OrcaBus API docs, OrcaHouse schemas or tables, OrcaBus APIs: each its own data source or tool, with its own access rules |
-| Modes       | Ask, which answers with Claude, and Search, which returns passages without a model                                  | Plan: Claude Sonnet 5 with agentic retrieval, at about three times the cost of Ask                                       |
-| Endpoints   | `/chat`, `/search`, `/documents/{id}`, `/feedback`; `/audit/*` for the audit group; `/health` and the API docs open | `/sources`, what is indexed and when it was synced; `/usage`, the caller's allowance left today                          |
-| Watching it | alarms on one alerts topic per stage, and the AWS Budgets backstop                                                  | a Synthetics canary, and a deeper one once a machine client can call `/chat`                                             |
+|             | Release 1                                                                                                                            | Later, each when someone needs it                                                                                        |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| Callers     | the docs chat panel and OrcaUI: ID tokens from the `docs-app` and OrcaUI Cognito clients, and in beta the `localhost` client         | other portal apps; a machine client, and AgentCore Gateway to offer the API to AI agents as MCP tools                    |
+| Sources     | the UMCCR documentation docs.umccr.org exports, in one data source, `docs`                                                           | OrcaBus API docs, OrcaHouse schemas or tables, OrcaBus APIs: each its own data source or tool, with its own access rules |
+| Modes       | Ask, which answers with Claude, and Search, which returns passages without a model                                                   | Plan: Claude Sonnet 5 with agentic retrieval, at about three times the cost of Ask                                       |
+| Endpoints   | `/chat`, `/chat/history`, `/search`, `/documents/{id}`, `/feedback`; `/audit/*` for the audit group; `/health` and the API docs open | `/sources`, what is indexed and when it was synced; `/usage`, the caller's allowance left today                          |
+| Watching it | alarms on one alerts topic per stage, and the AWS Budgets backstop                                                                   | a Synthetics canary, and a deeper one once a machine client can call `/chat`                                             |
 
 ## Where it fits
 

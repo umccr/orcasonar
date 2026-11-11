@@ -5,14 +5,32 @@ import { streamSSE } from 'hono/streaming';
 import { z } from 'zod';
 import { ApiError, errorDetail, invalidRequest } from './lib/errors';
 import { newId } from './lib/ids';
-import { auditExchange, auditRow, auditWindow, usageByCaller } from './services/audit';
+import type { Place } from './lib/pages';
+import { cursorWindow, FINGERPRINT, firstPage, pageAfter } from './lib/pages';
+import {
+  AUDIT_CONVERSATION_ROW,
+  AUDIT_WINDOW_DAYS,
+  auditConversationRow,
+  auditConversations,
+  auditExchange,
+  auditRow,
+  auditWindow,
+  usageByCaller,
+} from './services/audit';
 import type { Budget } from './services/budget';
 import type { Caller, ChatDeps, ChatEvent, ChatRequest, ChatResult } from './services/chat';
 import { answerQuestion } from './services/chat';
 import { parseDocumentId } from './services/documents';
+import {
+  HISTORY_DAYS,
+  historyConversations,
+  historyExchange,
+  historyWindow,
+  shownInHistory,
+} from './services/history';
 import type { Retriever } from './services/retrieval';
 import { MAX_QUESTION_CHARACTERS, toSource } from './services/retrieval';
-import type { DocumentStore, RecordStore } from './services/stores';
+import type { AuditEntry, DocumentStore, RecordStore } from './services/stores';
 
 export interface AppDeps extends Omit<ChatDeps, 'budget' | 'answerer'> {
   readonly corsAllowOrigins: readonly string[];
@@ -38,17 +56,21 @@ export interface AppDeps extends Omit<ChatDeps, 'budget' | 'answerer'> {
  */
 export const ROUTES = [
   { method: 'post', path: '/chat' },
+  { method: 'get', path: '/chat/history' },
+  { method: 'get', path: '/chat/history/{conversationId}' },
   { method: 'post', path: '/search' },
   { method: 'get', path: '/documents/{id}' },
   { method: 'post', path: '/feedback' },
   { method: 'get', path: '/audit/exchanges' },
+  { method: 'get', path: '/audit/conversations' },
   { method: 'get', path: '/audit/conversations/{conversationId}' },
   { method: 'get', path: '/audit/usage' },
 ] as const;
 
 const SLUG = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
 const Sites = z.array(z.string().regex(SLUG)).min(1).max(20).optional();
-const ConversationId = z.string().regex(/^c_[0-9a-f]{32}$/);
+const CONVERSATION_ID = /^c_[0-9a-f]{32}$/;
+const ConversationId = z.string().regex(CONVERSATION_ID);
 
 const ChatBody = z.object({
   query: z.string().trim().min(1).max(MAX_QUESTION_CHARACTERS),
@@ -72,6 +94,15 @@ const FeedbackBody = z.object({
 /** A UTC date, or an ISO time in UTC. */
 const Moment = z.union([z.iso.date(), z.iso.datetime()]).optional();
 
+/**
+ * The longest cursor a query accepts, well inside the URL API Gateway accepts. A list cursor names at most a page of
+ * conversations, by fingerprint, so it never needs more than about 2,200.
+ */
+const MAX_CURSOR_CHARACTERS = 4000;
+
+/** The most a page holds. */
+const MAX_PAGE_ITEMS = 100;
+
 const AuditListQuery = z.object({
   from: Moment,
   to: Moment,
@@ -83,14 +114,34 @@ const AuditListQuery = z.object({
     .transform((caller) => caller.toLowerCase())
     .optional(),
   outcome: z.enum(['answered', 'not-covered', 'failed']).optional(),
-  limit: z.coerce.number().int().min(1).max(100).default(50),
-  cursor: z.string().min(1).max(2000).optional(),
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_ITEMS).default(50),
+  cursor: z.string().min(1).max(MAX_CURSOR_CHARACTERS).optional(),
 });
 
 const AuditUsageQuery = z.object({ from: Moment, to: Moment });
 
-/** A page of the audit log carries its window, so the next page reads the same one even when `to` defaulted to now. */
-const AuditCursor = z.object({ from: z.iso.datetime(), to: z.iso.datetime(), after: z.string() });
+const HistoryQuery = z.object({
+  limit: z.coerce.number().int().min(1).max(MAX_PAGE_ITEMS).default(50),
+  cursor: z.string().min(1).max(MAX_CURSOR_CHARACTERS).optional(),
+});
+
+/**
+ * A page of `/audit/exchanges` carries its window, so the next page reads the same one even when `to` defaulted to
+ * now, and where DynamoDB stopped.
+ */
+const PageCursor = z.object({ from: z.iso.datetime(), to: z.iso.datetime(), after: z.string() });
+
+/**
+ * A page of a list built in memory carries its window, and its place in the list (`Place` in `lib/pages.ts`): at most
+ * the first page's items, by fingerprint.
+ */
+const ListCursor = z.object({
+  from: z.iso.datetime(),
+  to: z.iso.datetime(),
+  settled: z.iso.datetime(),
+  after: z.object({ lastAt: z.iso.datetime().optional(), id: z.string() }).optional(),
+  shown: z.array(z.string().regex(FINGERPRINT)).max(MAX_PAGE_ITEMS),
+});
 
 type Env = {
   Bindings: {
@@ -121,22 +172,68 @@ const parseBody = async <T>(c: Context<Env>, schema: z.ZodType<T>): Promise<T> =
   return validated(schema, body, 'body');
 };
 
-const auditCursor = (window: { from: string; to: string }, after: string) =>
-  Buffer.from(JSON.stringify({ ...window, after })).toString('base64url');
+const encodeCursor = (cursor: object) => Buffer.from(JSON.stringify(cursor)).toString('base64url');
 
-const fromAuditCursor = (cursor: string) => {
-  let parsed: unknown;
+const decodeCursor = (cursor: string): unknown => {
   try {
-    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+    return JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
   } catch {
-    parsed = undefined;
+    return undefined;
   }
-  const result = AuditCursor.safeParse(parsed);
-  if (!result.success) {
-    throw invalidRequest('cursor must be one a previous page returned.');
-  }
-  return result.data;
 };
+
+const badCursor = () => invalidRequest('cursor must be one a previous page returned.');
+
+/** An `/audit/exchanges` cursor's window and place, refused unless its window spans at most `days`. */
+const fromPageCursor = (cursor: string, days: number) => {
+  const result = PageCursor.safeParse(decodeCursor(cursor));
+  const window = result.success ? cursorWindow(result.data.from, result.data.to, days) : undefined;
+  if (!result.success || !window) {
+    throw badCursor();
+  }
+  return { ...window, after: result.data.after };
+};
+
+/** A time as `toISOString` writes it, to compare with stored times as strings. */
+const iso = (time: string) => new Date(time).toISOString();
+
+/**
+ * A list cursor's window and place. It is refused unless its window spans at most `days`, as the list's own window
+ * may, and the item it reads on after has an ID of the form the list makes.
+ */
+const fromListCursor = (cursor: string, limits: { days: number; id: RegExp }) => {
+  const result = ListCursor.safeParse(decodeCursor(cursor));
+  const window = result.success
+    ? cursorWindow(result.data.from, result.data.to, limits.days)
+    : undefined;
+  if (
+    !result.success ||
+    !window ||
+    (result.data.after !== undefined && !limits.id.test(result.data.after.id))
+  ) {
+    throw badCursor();
+  }
+  const { settled, after, shown } = result.data;
+  const place: Place = {
+    settled: iso(settled),
+    ...(after === undefined
+      ? {}
+      : {
+          after: {
+            ...(after.lastAt === undefined ? {} : { lastAt: iso(after.lastAt) }),
+            id: after.id,
+          },
+        }),
+    shown,
+  };
+  return { window, place };
+};
+
+/**
+ * Responses that hold readers' questions are never stored by a browser or anything between: the token in the request
+ * keeps them from shared caches, and this from the browser's own.
+ */
+const noStore = (c: Context<Env>) => c.header('Cache-Control', 'no-store');
 
 /** The caller the authorizer verified. API Gateway passes its context as `requestContext.authorizer`. */
 const callerFrom = (c: Context<Env>, devCaller?: Caller): Caller => {
@@ -294,7 +391,78 @@ export const createApp = (deps: AppDeps) => {
       answer: result.answer,
       citations: result.citations,
       usage: result.usage,
+      costUsd: result.costUsd,
     });
+  });
+
+  /**
+   * The caller's own conversations from the last 30 days, most recently active first. The caller is the token's, never
+   * a parameter, so no one can read another reader's history; it reads the audit log through its index by caller, so
+   * it never reads anyone else's entries either.
+   */
+  app.get('/chat/history', async (c) => {
+    const caller = callerFrom(c, deps.devCaller);
+    const query = validated(HistoryQuery, c.req.query(), 'query');
+    const cursor =
+      query.cursor === undefined
+        ? undefined
+        : fromListCursor(query.cursor, { days: HISTORY_DAYS, id: CONVERSATION_ID });
+    const now = deps.clock();
+    const last30Days = historyWindow(now);
+    // A later page keeps its cursor's window, but never reads back past 30 days, as one conversation does not: what is
+    // older is expired, and a cursor is not signed.
+    const window = cursor
+      ? {
+          from: cursor.window.from > last30Days.from ? cursor.window.from : last30Days.from,
+          to: cursor.window.to,
+        }
+      : last30Days;
+    // A cursor whose whole window has since expired has nothing left to read, and DynamoDB refuses a window that ends
+    // before it starts.
+    if (window.from > window.to) {
+      noStore(c);
+      return c.json({ items: [] });
+    }
+    const entries = await deps.audit.byCaller(caller.id, window.from, window.to);
+    const list = {
+      build: historyConversations,
+      id: (conversation: { conversationId: string }) => conversation.conversationId,
+    };
+    const page = cursor
+      ? pageAfter(entries, list, cursor.place, query.limit)
+      : firstPage(entries, list, now, query.limit);
+    noStore(c);
+    return c.json({
+      items: page.items,
+      nextCursor: page.next && encodeCursor({ ...window, ...page.next }),
+    });
+  });
+
+  /**
+   * The caller's own exchanges in one of their conversations, oldest first, as the list counts them; a conversation
+   * with exchanges history shows, none of them the caller's, is refused, as for a follow-up. A follow-up refused because
+   * the conversation was someone else's is kept under it, failed, with the caller who sent it. And where the first
+   * turn could not be saved, a follow-up has no owner to check against, so a conversation can hold exchanges that two
+   * readers saw; each is shown only their own.
+   */
+  app.get('/chat/history/:conversationId', async (c) => {
+    const caller = callerFrom(c, deps.devCaller);
+    const conversationId = validated(
+      ConversationId,
+      c.req.param('conversationId'),
+      'conversationId'
+    );
+    const exchanges = shownInHistory(await deps.audit.conversation(conversationId));
+    const own = exchanges.filter((entry) => entry.callerId === caller.id);
+    if (own.length === 0 && exchanges.length > 0) {
+      throw new ApiError(403, 'forbidden', 'That conversation belongs to someone else.');
+    }
+    const shown = shownInHistory(own, historyWindow(deps.clock()).from);
+    if (shown.length === 0) {
+      throw new ApiError(404, 'not-found', 'Your history has no such conversation.');
+    }
+    noStore(c);
+    return c.json({ conversationId, exchanges: shown.map(historyExchange) });
   });
 
   app.post('/search', async (c) => {
@@ -337,7 +505,8 @@ export const createApp = (deps: AppDeps) => {
   app.get('/audit/exchanges', async (c) => {
     const viewer = auditorFrom(c);
     const query = validated(AuditListQuery, c.req.query(), 'query');
-    const cursor = query.cursor === undefined ? undefined : fromAuditCursor(query.cursor);
+    const cursor =
+      query.cursor === undefined ? undefined : fromPageCursor(query.cursor, AUDIT_WINDOW_DAYS);
     const window = cursor
       ? { from: cursor.from, to: cursor.to }
       : auditWindow(query.from, query.to, deps.clock());
@@ -355,10 +524,50 @@ export const createApp = (deps: AppDeps) => {
       filtered: query.caller !== undefined || query.outcome !== undefined,
       count: page.items.length,
     });
+    noStore(c);
     return c.json({
       ...window,
       items: page.items.map(auditRow),
-      nextCursor: page.cursor === undefined ? undefined : auditCursor(window, page.cursor),
+      nextCursor:
+        page.cursor === undefined ? undefined : encodeCursor({ ...window, after: page.cursor }),
+    });
+  });
+
+  /**
+   * The audit log grouped by conversation, a row for each caller in it. Like usage, it reads the whole window, which
+   * the budget keeps small, and groups and pages it here; `total` counts every row that matches, across pages.
+   */
+  app.get('/audit/conversations', async (c) => {
+    const viewer = auditorFrom(c);
+    const query = validated(AuditListQuery, c.req.query(), 'query');
+    const cursor =
+      query.cursor === undefined
+        ? undefined
+        : fromListCursor(query.cursor, { days: AUDIT_WINDOW_DAYS, id: AUDIT_CONVERSATION_ROW });
+    const now = deps.clock();
+    const window = cursor?.window ?? auditWindow(query.from, query.to, now);
+    const entries = await deps.audit.between(window.from, window.to);
+    const list = {
+      build: (exchanges: readonly AuditEntry[]) =>
+        auditConversations(exchanges, { caller: query.caller, outcome: query.outcome }),
+      id: auditConversationRow,
+    };
+    const page = cursor
+      ? pageAfter(entries, list, cursor.place, query.limit)
+      : firstPage(entries, list, now, query.limit);
+    deps.log({
+      outcome: 'audit-read',
+      viewer: viewer.id,
+      route: 'conversations',
+      filtered: query.caller !== undefined || query.outcome !== undefined,
+      count: page.items.length,
+    });
+    noStore(c);
+    return c.json({
+      ...window,
+      total: page.total,
+      items: page.items,
+      nextCursor: page.next && encodeCursor({ ...window, ...page.next }),
     });
   });
 
@@ -379,6 +588,7 @@ export const createApp = (deps: AppDeps) => {
     if (entries.length === 0) {
       throw new ApiError(404, 'not-found', 'The audit log has no such conversation.');
     }
+    noStore(c);
     return c.json({ conversationId, exchanges: entries.map(auditExchange) });
   });
 
@@ -388,6 +598,7 @@ export const createApp = (deps: AppDeps) => {
     const window = auditWindow(query.from, query.to, deps.clock());
     const entries = await deps.audit.between(window.from, window.to);
     deps.log({ outcome: 'audit-read', viewer: viewer.id, route: 'usage', count: entries.length });
+    noStore(c);
     return c.json({ ...window, ...usageByCaller(entries) });
   });
 

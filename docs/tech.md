@@ -83,13 +83,13 @@ Prettier configuration, and the root's leave `app/` out, so `make check-all` and
 
 ### Functions
 
-| Function             | Entry point               | Invoked by                                                                   | Memory and timeout  |
-| -------------------- | ------------------------- | ---------------------------------------------------------------------------- | ------------------- |
-| `ChatFunction`       | `handlers/chat.ts`        | `POST /api/v1/chat`, with response streaming                                 | 1,024 MB, 5 minutes |
-| `QueryFunction`      | `handlers/query.ts`       | `POST /api/v1/search`, `GET /api/v1/documents/{id}`, `POST /api/v1/feedback` | 512 MB, 29 seconds  |
-| `AuthorizerFunction` | `handlers/authorizer.ts`  | API Gateway, as a TOKEN authorizer cached five minutes per token             | 256 MB, 10 seconds  |
-| `IngestMarkFunction` | `handlers/ingest-mark.ts` | EventBridge: an object created or deleted under `docs/`                      | 256 MB, 10 seconds  |
-| `IngestRunFunction`  | `handlers/ingest-run.ts`  | EventBridge: every 15 minutes                                                | 256 MB, 30 seconds  |
+| Function             | Entry point               | Invoked by                                                                                                | Memory and timeout  |
+| -------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------- |
+| `ChatFunction`       | `handlers/chat.ts`        | `POST /api/v1/chat`, with response streaming                                                              | 1,024 MB, 5 minutes |
+| `QueryFunction`      | `handlers/query.ts`       | `POST /api/v1/search`, `GET /api/v1/documents/{id}`, `POST /api/v1/feedback`, `GET /api/v1/chat/history…` | 512 MB, 29 seconds  |
+| `AuthorizerFunction` | `handlers/authorizer.ts`  | API Gateway, as a TOKEN authorizer cached five minutes per token                                          | 256 MB, 10 seconds  |
+| `IngestMarkFunction` | `handlers/ingest-mark.ts` | EventBridge: an object created or deleted under `docs/`                                                   | 256 MB, 10 seconds  |
+| `IngestRunFunction`  | `handlers/ingest-run.ts`  | EventBridge: every 15 minutes                                                                             | 256 MB, 30 seconds  |
 
 All five run outside a VPC and call nothing but AWS APIs. `NodejsFunction` bundles each with esbuild to CommonJS for
 `node24`, minified with source maps, and with `externalModules: []`, so that the AWS SDK a function runs is the one
@@ -113,6 +113,9 @@ the tests ran.
 - **The audit log** is read only by members of `AUDIT_GROUP`, which only the audit function is given, so the audit
   routes refuse everyone on any other function. Each read is logged as `audit-read`, with the viewer's `sub` and
   never what it returned.
+- **History** (`/chat/history…`) is the caller's own, from the token's `sub`, never a parameter. It maps each audit
+  entry to what the reader saw, field by field, so nothing the audit log adds (email, client, cost, tokens, model,
+  guardrail) reaches it.
 - **Writes after an answer** are best-effort. A turn, record or audit entry that fails to save is logged as
   `write-error`, and
   `done` still follows, because the reader already has the answer.
@@ -154,11 +157,15 @@ with the Sonar key. Items expire through `expiresAt`, in seconds since the epoch
 | the stale mark               | `ingest`             | `stale`, with `at` and `revision`  | never                          |
 | the job started for the mark | `ingest`             | `job`, with `jobId` and `revision` | never                          |
 
-Audit entries also carry `auditPk`, always `exchange`, and `at`, the keys of the one index, `audit-by-time`, which
-lists them by time; only audit items have `auditPk`, so the index holds nothing else. A caller or an outcome is
-filtered as the entries are read, which reads every entry in the window; the budget keeps that to about a hundred a
-day. A table update can create one index at most, so a second index, such as one by caller, needs a deploy of its
-own.
+Audit entries also carry `auditPk`, always `exchange`, and `at`, the keys of the index `audit-by-time`, which lists
+them by time; only audit items have `auditPk`, so the index holds nothing else. For the audit routes a caller or an
+outcome is filtered as the entries are read, which reads every entry in the window; the budget keeps that to about a
+hundred a day. A second index, `audit-by-caller`, lists one caller's entries by `callerId` and `at`, so a reader's
+history never reads anyone else's; only the query function may query it. Besides the keys it holds only
+`conversationId`, `question` and `outcome`, what the list of conversations needs, so listing them never reads the
+answers. A table update can create or delete one index at most, and an index's projection cannot change once it
+exists, so a third index, or another projection, needs deploys of its own. An index must be `ACTIVE` before the
+stateless code that queries it is deployed, and CloudFormation does not wait for that.
 
 The three spend counters change together in one transaction, so they always agree, and a hold is conditional on the
 caller's and the day's counters being under their limits. The records bucket holds
@@ -319,7 +326,7 @@ beta by hand from a branch, with dev credentials, see [deploy.md](deploy.md#step
 | an error code                                                                   | `ErrorCode` in `app/src/lib/errors.ts`, the enum in `openapi.yaml`, `GATEWAY_ERRORS` in `stateless-stack.ts` if API Gateway can return it, and [api.md](api.md#errors)                                                                                                                                                 |
 | a limit per request: question length, history, passages or answer tokens        | keep `ANSWER_HOLD_USD` (`app/src/services/budget.ts`) above the most an answer can then cost, and update `openapi.yaml` and [api.md](api.md#limits)                                                                                                                                                                    |
 | a log `outcome`                                                                 | the metric filters in `stateless-stack.ts`, and the query in [runbook.md](runbook.md#an-alarm-fired)                                                                                                                                                                                                                   |
-| the audit index                                                                 | `AUDIT_INDEX` in both `app/src/aws/dynamodb.ts` and `infrastructure/stage/constants.ts`. Deploy the stateful stack to prod before the stateless stack that queries a new index.                                                                                                                                        |
+| the audit index                                                                 | `AUDIT_INDEX` in both `app/src/aws/dynamodb.ts` and `infrastructure/stage/constants.ts`. Deploy the stateful stack to prod, and wait until a new index is `ACTIVE`, before the stateless stack that queries it.                                                                                                        |
 | the guardrail's policies                                                        | nothing in the stateless stack, which reads the new version from SSM; run the stateless pipeline afterwards so its fallback version moves too, then delete old versions ([runbook](runbook.md#change-the-guardrail))                                                                                                   |
 | the knowledge base or its data source                                           | check the stateful diff for a replacement: a new knowledge base starts empty, so start an ingestion job after the deploy                                                                                                                                                                                               |
 | a calling app                                                                   | its client ID parameter in `ALLOWED_CLIENT_ID_PARAMETERS` and its hosts in `corsAllowOrigins` (`infrastructure/stage/config.ts`). OrcaUI's are in `infrastructure/shared/platform.ts`. The app calls with the reader's ID token, and its Content-Security-Policy, if it has one, must allow `sonar.<stage>.umccr.org`. |

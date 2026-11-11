@@ -20,3 +20,5 @@ auditConfig:
 overrides:
   '@vitest/mocker@>=2.1.0-beta.7 <4.1.12': '>=4.1.12'
   '@vitest/mocker@>=4.1.11 <4.1.12': '>=4.1.12'
+  'glob@>=9.0.0 <=14.0.1': '^14.0.2'
+  'minimatch@>=7.0.0 <11.0.1': '^11.0.1'

@@ -1,5 +1,6 @@
 import { invalidRequest } from '../lib/errors';
-import type { AuditEntry } from './stores';
+import { byKeyDescending, conversationKey } from '../lib/pages';
+import type { AuditEntry, AuditOutcome } from './stores';
 
 /**
  * The audit log, for administrators: who asked what, what came back, and what it cost. Entries are kept 30 days, as the
@@ -87,6 +88,125 @@ export const auditExchange = (entry: AuditEntry) => ({
 });
 
 const dollars = (usd: number) => Math.round(usd * 1_000_000) / 1_000_000;
+
+/** Each outcome's count, as a conversation or a reader's usage names it. */
+const OUTCOME_COUNTS = {
+  answered: 'answered',
+  'not-covered': 'notCovered',
+  failed: 'failed',
+} as const satisfies Record<AuditOutcome, string>;
+
+/**
+ * A row's name in the audit list of conversations: its conversation, then whose exchanges it holds, since one
+ * conversation can have a row for each caller.
+ */
+export const auditConversationRow = (row: { conversationId: string; caller: { id: string } }) =>
+  `${row.conversationId}#${row.caller.id}`;
+
+/** What `auditConversationRow` makes, to check a cursor against before trusting it. */
+export const AUDIT_CONVERSATION_ROW = /^c_[0-9a-f]{32}#[^#\s]+$/;
+
+/** A row's key in the audit list of conversations: its conversation's key, then whose exchanges it holds. */
+const auditConversationKey = (row: {
+  lastAt: string;
+  conversationId: string;
+  caller: { id: string };
+}) => `${conversationKey(row)}#${row.caller.id}`;
+
+/**
+ * The window's exchanges as conversations, most recently active first: who asked, the first question, and what their
+ * exchanges in the window add up to. Each row is one caller's exchanges in one conversation. Only its owner can
+ * continue a conversation, but a follow-up refused for that reason is kept under the conversation it named, with the
+ * caller who sent it; it is that caller's own row, and never names or adds to the owner's. A conversation that began
+ * before the window counts only the exchanges inside it; `/audit/conversations/{conversationId}` has all of it.
+ * `caller` keeps one reader's, by `sub` or lower-cased email, and `outcome` those with at least one exchange that
+ * ended that way.
+ */
+export const auditConversations = (
+  entries: readonly AuditEntry[],
+  filter: { readonly caller?: string; readonly outcome?: AuditOutcome } = {}
+) => {
+  const conversations = new Map<
+    string,
+    {
+      conversationId: string;
+      callerId: string;
+      email?: string;
+      clientId: string;
+      startedAt: string;
+      lastAt: string;
+      firstQuestion: string;
+      questions: number;
+      answered: number;
+      notCovered: number;
+      failed: number;
+      sites: string[];
+      costUsd: number;
+      inputTokens: number;
+      outputTokens: number;
+      guardrailInterventions: number;
+    }
+  >();
+  for (const entry of entries) {
+    if (filter.caller && entry.callerId !== filter.caller && entry.email !== filter.caller) {
+      continue;
+    }
+    const key = `${entry.conversationId}#${entry.callerId}`;
+    let conversation = conversations.get(key);
+    if (!conversation) {
+      conversation = {
+        conversationId: entry.conversationId,
+        callerId: entry.callerId,
+        email: entry.email,
+        clientId: entry.clientId,
+        startedAt: entry.at,
+        lastAt: entry.at,
+        firstQuestion: entry.question,
+        questions: 0,
+        answered: 0,
+        notCovered: 0,
+        failed: 0,
+        sites: [],
+        costUsd: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        guardrailInterventions: 0,
+      };
+      conversations.set(key, conversation);
+    }
+    conversation.email ??= entry.email;
+    if (entry.at < conversation.startedAt) {
+      conversation.startedAt = entry.at;
+      conversation.firstQuestion = entry.question;
+    }
+    if (entry.at > conversation.lastAt) {
+      conversation.lastAt = entry.at;
+      conversation.clientId = entry.clientId;
+    }
+    conversation.questions += 1;
+    conversation[OUTCOME_COUNTS[entry.outcome]] += 1;
+    for (const site of entry.sites ?? []) {
+      if (!conversation.sites.includes(site)) {
+        conversation.sites.push(site);
+      }
+    }
+    conversation.costUsd += entry.costUsd ?? 0;
+    conversation.inputTokens += entry.usage?.inputTokens ?? 0;
+    conversation.outputTokens += entry.usage?.outputTokens ?? 0;
+    if (entry.guardrail === 'intervened') {
+      conversation.guardrailInterventions += 1;
+    }
+  }
+  return [...conversations.values()]
+    .filter((conversation) => !filter.outcome || conversation[OUTCOME_COUNTS[filter.outcome]] > 0)
+    .map(({ conversationId, callerId, email, clientId, costUsd, ...conversation }) => ({
+      conversationId,
+      caller: { id: callerId, email, clientId },
+      ...conversation,
+      costUsd: dollars(costUsd),
+    }))
+    .sort(byKeyDescending(auditConversationKey));
+};
 
 /** What each caller asked and spent, most questions first, and the totals. */
 export const usageByCaller = (entries: readonly AuditEntry[]) => {

@@ -11,6 +11,21 @@ export interface ConversationStore {
   append(conversationId: string, ownerId: string, turn: Turn): Promise<void>;
 }
 
+/**
+ * A page an answer cited, as the records and the audit log keep it: the citation the reader was shown, so a saved
+ * answer's citations can be shown again as they were. `ref` is the number the answer cites it by, as in `[2]`.
+ * Exchanges saved before the whole citation was kept have only the page's ID, its URL and its score.
+ */
+export interface CitedSource {
+  readonly ref?: number;
+  readonly id: string;
+  readonly title?: string;
+  readonly url: string;
+  readonly site?: string;
+  readonly snippet?: string;
+  readonly score: number;
+}
+
 /** One question and its answer, kept 30 days for evaluation. */
 export interface ExchangeRecord {
   readonly exchangeId: string;
@@ -22,7 +37,7 @@ export interface ExchangeRecord {
   readonly question: string;
   readonly sites?: readonly string[];
   readonly answer: string;
-  readonly sources: ReadonlyArray<{ id: string; url: string; score: number }>;
+  readonly sources: readonly CitedSource[];
   readonly modelId?: string;
   readonly usage?: { inputTokens: number; outputTokens: number };
   readonly costUsd: number;
@@ -60,6 +75,12 @@ export interface AuditEntry
   readonly errorCode?: string;
 }
 
+/** An exchange as the index by caller holds it: enough to list a reader's conversations, and none of the answers. */
+export type CallerExchange = Pick<
+  AuditEntry,
+  'callerId' | 'at' | 'conversationId' | 'question' | 'outcome'
+>;
+
 export interface AuditQuery {
   /** ISO times, both included. */
   readonly from: string;
@@ -76,8 +97,13 @@ export interface AuditStore {
   put(entry: AuditEntry): Promise<void>;
   /** A page of exchanges, newest first, with a cursor for the next when there may be more. */
   list(query: AuditQuery): Promise<{ items: AuditEntry[]; cursor?: string }>;
-  /** Every exchange between two ISO times, both included, newest first. */
+  /** Every exchange between two ISO times, both included, newest first. `from` after `to` throws, as DynamoDB does. */
   between(from: string, to: string): Promise<AuditEntry[]>;
+  /**
+   * Every exchange one caller asked, by Cognito `sub`, between two ISO times, both included, newest first. `from` after
+   * `to` throws, as DynamoDB does.
+   */
+  byCaller(callerId: string, from: string, to: string): Promise<CallerExchange[]>;
   /** A conversation's exchanges, oldest first. */
   conversation(conversationId: string): Promise<AuditEntry[]>;
 }

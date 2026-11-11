@@ -138,8 +138,8 @@ the `data-portal-prod` user pool may: to let someone read it, add them to that g
 it, within the hour. In beta it is `*` for now, so any token the API accepts reads it, as for chat and search. Set
 beta back to `admin` before readers outside the platform team use it there.
 
-Call it with an ID token issued to the `docs-app` client, as every route needs: a token from the portal or another
-client gets `401`. Sign in on the stage's docs site and open the chat panel once, then copy the panel's current token
+Call it with an ID token from an allowed client, as every route needs: the docs site's `docs-app`, OrcaUI's, or in
+beta the `localhost` client's; a token from another client gets `401`. Sign in on the stage's docs site and open the chat panel once, then copy the panel's current token
 in the browser console with `copy(await umccrDocsAuth.getIdToken())`. It lasts an hour. Use it in Swagger UI at
 `/schema/swagger-ui/` (**Authorize**, the token alone, without `Bearer`) or with curl:
 

@@ -42,5 +42,17 @@ export const DOCS_APP_CLIENT_ID_PARAMETER = '/cognito/docs-app/app-client-id';
  */
 export const AUDIT_INDEX = 'audit-by-time';
 
+/**
+ * The Sonar table's index of each caller's exchanges by time, for their own history: `callerId` and `at`. Keep in
+ * step with `AUDIT_CALLER_INDEX` in `app/src/aws/dynamodb.ts`.
+ */
+export const AUDIT_CALLER_INDEX = 'audit-by-caller';
+
+/**
+ * What the index by caller holds besides the keys: what a reader's list of conversations needs, and none of the
+ * answers. Keep in step with `toCallerExchange` in `app/src/aws/dynamodb.ts`.
+ */
+export const AUDIT_CALLER_ATTRIBUTES = ['conversationId', 'question', 'outcome'];
+
 /** Questions, answers and feedback are kept this long, for evaluation, then deleted. */
 export const RECORD_RETENTION_DAYS = 30;

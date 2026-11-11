@@ -291,6 +291,7 @@ aws bedrock get-account-data-retention   # mode: none is the design; inherit is 
 | `/data_portal/client/cog_user_pool_id`             | `umccr/infrastructure` `cognito_aai`               | the authorizer's user pool                                                              |
 | `/cognito/docs-app/app-client-id`                  | `umccr/infrastructure` `cognito_aai/app_docs.tf`   | the authorizer's allowed client: apply it as the docs-platform guide's step 1 describes |
 | `/orcaui/cog_app_client_id_stage`                  | `umccr/infrastructure` `cognito_aai/app_orcaui.tf` | the authorizer's allowed client for OrcaUI; already there wherever OrcaUI runs          |
+| `/cognito/localhost-app/app-client-id`             | `umccr/infrastructure` `cognito_aai/app_local.tf`  | dev only: beta's allowed client for portal apps run on a developer's machine            |
 
 ### API Gateway logging (optional)
 
@@ -351,6 +352,9 @@ aws sso login --profile dev && export AWS_PROFILE=dev AWS_REGION=ap-southeast-2
 aws ssm get-parameters --query InvalidParameters --names \
   /umccr/certificate_arn /hosted_zone/umccr/id /hosted_zone/umccr/name \
   /data_portal/client/cog_user_pool_id /cognito/docs-app/app-client-id /orcaui/cog_app_client_id_stage
+
+# In dev, the localhost client beta accepts as well
+aws ssm get-parameters --query InvalidParameters --names /cognito/localhost-app/app-client-id
 
 # b) The certificate is regional, issued, and covers sonar.<stage zone>
 CERT=$(aws ssm get-parameter --name /umccr/certificate_arn --query Parameter.Value --output text)
@@ -576,6 +580,11 @@ Changes that need care:
 - **The knowledge base or its data source**: some property changes replace the knowledge base, and a replacement
   starts empty. The scheduler only starts a job after a document changes, so start one by hand after the deploy
   (the [runbook](runbook.md#the-index-is-stale)). Check the stateful diff for replacements before approving prod.
+- **A table index**: CloudFormation starts building a new index and moves on without waiting for it. Approve the
+  stateless pipeline's prod stage only once the index is `ACTIVE`:
+  `aws dynamodb describe-table --table-name OrcaSonarTable-prod --query 'Table.GlobalSecondaryIndexes[].[IndexName,IndexStatus]'`.
+  A table update can create or delete one index, and an index's projection cannot change, so changing one takes a
+  deploy that removes it and another that adds it back.
 - **The guardrail**: each change to its policies publishes a new version. The stateless stack reads
   `/orcasonar/guardrail-version` when it deploys, and a guardrail change starts only the stateful pipeline, so start
   the stateless pipeline once the stateful one has deployed the change.
@@ -614,6 +623,7 @@ Before calling a stage done:
 | ----------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
 | The stateless deploy fails: parameter `/orcasonar/...` not found                                                                    | the stateful stack is not in that stage yet                                                         | wait for, or deploy, the stateful stack there; then run the stateless pipeline again         |
 | A deploy fails: parameter `/cognito/docs-app/app-client-id` not found                                                               | the docs platform's Cognito client is not applied to that workspace                                 | docs-platform guide, step 1                                                                  |
+| The beta deploy fails: parameter `/cognito/localhost-app/app-client-id` not found                                                   | dev's `cognito_aai` workspace has no localhost client                                               | apply `cognito_aai` in dev, where `allow_cognito_app_local_map` turns it on                  |
 | The custom domain fails: certificate                                                                                                | `/umccr/certificate_arn` is not in ap-southeast-2, or does not cover `sonar.<stage zone>`           | step 2                                                                                       |
 | The knowledge base fails to create                                                                                                  | permissions for the managed vector store and the Sonar key                                          | the stack event's reason; an open item in [architecture.md](architecture.md#open-items)      |
 | A stage stack is in `ROLLBACK_COMPLETE`                                                                                             | its first deploy failed and rolled back; CloudFormation cannot update it                            | delete the stack, fix the cause, and run the stage again                                     |

@@ -17,7 +17,13 @@ import { ApiError } from '../lib/errors';
 import type { AnswerEvent } from '../services/answer';
 import type { AuditEntry } from '../services/stores';
 import { BedrockAnswerer, KnowledgeBaseIngestion, KnowledgeBaseRetriever } from './bedrock';
-import { AUDIT_INDEX, DynamoAuditStore, DynamoIngestState, DynamoSpendStore } from './dynamodb';
+import {
+  AUDIT_CALLER_INDEX,
+  AUDIT_INDEX,
+  DynamoAuditStore,
+  DynamoIngestState,
+  DynamoSpendStore,
+} from './dynamodb';
 import { metadataValues, S3DocumentStore } from './s3';
 import { cachedParameter } from './ssm';
 
@@ -460,6 +466,40 @@ describe('DynamoAuditStore', () => {
       .resolvesOnce({ Items: [item(11)] });
     expect(await store().between(window.from, window.to)).toEqual([entry(12), entry(11)]);
     expect(queries()[0]!.FilterExpression).toBeUndefined();
+  });
+
+  test("reads one caller's exchanges through the index by caller, newest first, every page", async () => {
+    // As the index holds them: the keys, and what a list of conversations needs.
+    const indexed = (day: number) => {
+      const { pk, sk, callerId, at, conversationId, question, outcome } = item(day);
+      return { pk, sk, callerId, at, conversationId, question, outcome };
+    };
+    dynamodb
+      .on(QueryCommand)
+      .resolvesOnce({ Items: [indexed(12)], LastEvaluatedKey: { page: 1 } })
+      // An index that still holds whole items, as before its projection changed, gives no more than that.
+      .resolvesOnce({ Items: [item(11)] });
+    const listed = (day: number) => ({
+      callerId: 'reader-1',
+      at: entry(day).at,
+      conversationId: conversation,
+      question: 'How do I add a site?',
+      outcome: 'answered',
+    });
+    expect(await store().byCaller('reader-1', window.from, window.to)).toEqual([
+      listed(12),
+      listed(11),
+    ]);
+    expect(queries()[0]).toEqual({
+      TableName: 'table',
+      IndexName: AUDIT_CALLER_INDEX,
+      KeyConditionExpression: '#callerId = :caller AND #at BETWEEN :from AND :to',
+      ExpressionAttributeNames: { '#callerId': 'callerId', '#at': 'at' },
+      ExpressionAttributeValues: { ':caller': 'reader-1', ':from': window.from, ':to': window.to },
+      ScanIndexForward: false,
+      ExclusiveStartKey: undefined,
+    });
+    expect(queries()[1]!.ExclusiveStartKey).toEqual({ page: 1 });
   });
 
   test("reads a conversation's exchanges from the table, oldest first, every page", async () => {
