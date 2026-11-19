@@ -200,6 +200,32 @@ describe('stateful stack', () => {
     }
   });
 
+  // The chat function guards the question too, so these filters see it as well as the answer.
+  test('masks emails and phone numbers in answers only, and refuses keys and passwords either way', () => {
+    template.hasResourceProperties('AWS::Bedrock::Guardrail', {
+      SensitiveInformationPolicyConfig: {
+        PiiEntitiesConfig: [
+          { Type: 'EMAIL', Action: 'ANONYMIZE', InputEnabled: false },
+          { Type: 'PHONE', Action: 'ANONYMIZE', InputEnabled: false },
+          { Type: 'AWS_ACCESS_KEY', Action: 'BLOCK' },
+          { Type: 'AWS_SECRET_KEY', Action: 'BLOCK' },
+          { Type: 'PASSWORD', Action: 'BLOCK' },
+        ],
+      },
+    });
+    const [entities] = Object.values(template.findResources('AWS::Bedrock::Guardrail')).map(
+      (guardrail) =>
+        (
+          guardrail as {
+            Properties: { SensitiveInformationPolicyConfig: { PiiEntitiesConfig: object[] } };
+          }
+        ).Properties.SensitiveInformationPolicyConfig.PiiEntitiesConfig
+    );
+    // Nothing turns a filter off for answers, or for keys and passwords in questions.
+    expect(JSON.stringify(entities)).not.toContain('OutputEnabled');
+    expect(entities!.filter((entity) => 'InputEnabled' in entity)).toHaveLength(2);
+  });
+
   // A chat function names the version it last read until it reads the new one.
   test.each(STAGES)('%s keeps a guardrail version it replaces', (stage) => {
     Template.fromStack(statefulStack(stage).stack).hasResource('AWS::Bedrock::GuardrailVersion', {

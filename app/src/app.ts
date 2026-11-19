@@ -21,6 +21,7 @@ import type { Budget } from './services/budget';
 import type { Caller, ChatDeps, ChatEvent, ChatRequest, ChatResult } from './services/chat';
 import { answerQuestion } from './services/chat';
 import { parseDocumentId } from './services/documents';
+import { MAX_CHAT_QUESTION_CHARACTERS } from './services/prompt';
 import {
   HISTORY_DAYS,
   historyConversations,
@@ -73,7 +74,11 @@ const CONVERSATION_ID = /^c_[0-9a-f]{32}$/;
 const ConversationId = z.string().regex(CONVERSATION_ID);
 
 const ChatBody = z.object({
-  query: z.string().trim().min(1).max(MAX_QUESTION_CHARACTERS),
+  query: z
+    .string()
+    .trim()
+    .min(1)
+    .max(MAX_CHAT_QUESTION_CHARACTERS, 'ask in 1,000 characters or fewer, or use Search.'),
   conversationId: ConversationId.optional(),
   sites: Sites,
   mode: z.enum(['ask']).default('ask'),

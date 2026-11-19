@@ -10,14 +10,23 @@ describe('prompt', () => {
     expect(sources).toContain('[2] Publishing contract');
   });
 
-  test('marks the sources and the question for the grounding check', () => {
+  test('marks the sources for the grounding check only, and the question for every policy', () => {
     const messages = buildMessages('How do I add a site?', SAMPLE_PASSAGES, []);
     const last = messages.at(-1)!;
     expect(last.role).toBe('user');
     const guarded = last.content.flatMap((block) =>
-      'guardContent' in block ? [block.guardContent.text.qualifiers[0]] : []
+      'guardContent' in block ? [block.guardContent.text.qualifiers] : []
     );
-    expect(guarded).toEqual(['grounding_source', 'query']);
+    expect(guarded).toEqual([['grounding_source'], ['query', 'guard_content']]);
+  });
+
+  test('leaves earlier turns out of guard content, so the guardrail checks only the latest question', () => {
+    const history = [{ question: 'q0', answer: 'a0' }];
+    const messages = buildMessages('next', SAMPLE_PASSAGES, history);
+    expect(messages.slice(0, 2)).toEqual([
+      { role: 'user', content: [{ text: 'q0' }] },
+      { role: 'assistant', content: [{ text: 'a0' }] },
+    ]);
   });
 
   test('keeps only the last few turns of history', () => {

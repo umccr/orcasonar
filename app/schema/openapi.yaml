@@ -346,7 +346,11 @@ components:
       type: object
       required: [query]
       properties:
-        query: { type: string, minLength: 1, maxLength: 2000 }
+        query:
+          type: string
+          minLength: 1
+          maxLength: 1000
+          description: The guardrail's grounding check refuses a longer query
         conversationId: { type: string, pattern: '^c_[0-9a-f]{32}$' }
         sites: { $ref: '#/components/schemas/Sites' }
         mode: { type: string, enum: [ask], default: ask }
@@ -451,6 +455,12 @@ components:
     AuditOutcome:
       type: string
       enum: [answered, not-covered, failed]
+    AuditGuardrail:
+      description: >-
+        What the guardrail did: `intervened` when it blocked the question or replaced the answer, `masked` when it only
+        masked values, such as an email address, in an answer that stands with its sources
+      type: string
+      enum: [none, masked, intervened]
     AuditCaller:
       type: object
       required: [id, clientId]
@@ -474,7 +484,7 @@ components:
         sites: { type: array, items: { type: string } }
         citations: { type: integer, description: 'How many sources the answer cited' }
         costUsd: { type: number }
-        guardrail: { type: string, enum: [none, intervened] }
+        guardrail: { $ref: '#/components/schemas/AuditGuardrail' }
         latencyMs: { type: integer }
     AuditExchange:
       type: object
@@ -494,7 +504,7 @@ components:
         modelId: { type: string }
         usage: { $ref: '#/components/schemas/Usage' }
         costUsd: { type: number }
-        guardrail: { type: string, enum: [none, intervened] }
+        guardrail: { $ref: '#/components/schemas/AuditGuardrail' }
         latencyMs: { type: integer }
     AuditConversation:
       description: One caller's exchanges in a conversation in the window, and what they add up to
@@ -534,7 +544,10 @@ components:
         inputTokens: { type: integer }
         outputTokens: { type: integer }
         guardrailInterventions:
-          { type: integer, description: 'Answers the guardrail intervened in' }
+          {
+            type: integer,
+            description: 'Answers the guardrail blocked; masked ones are not counted',
+          }
         costUsd: { type: number }
     AuditUsage:
       type: object

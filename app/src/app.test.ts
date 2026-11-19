@@ -287,12 +287,46 @@ describe('POST /chat, streamed', () => {
     expect(deps.scriptedAnswerer.requests).toHaveLength(0);
   });
 
-  test('lists no sources when the guardrail intervenes', async () => {
-    const answerer = new ScriptedAnswerer('That request is not supported.', undefined, true);
+  test('lists no sources when the guardrail blocks the answer', async () => {
+    const answerer = new ScriptedAnswerer('That request is not supported.', undefined, 'blocked');
     const { app, deps } = setup({ answerer });
     const response = await app.request(post('/chat', { query: 'Diagnose me' }), undefined, READER);
     expect(((await response.json()) as { citations: unknown[] }).citations).toEqual([]);
     expect(deps.recordStore.exchanges[0]!.guardrail).toBe('intervened');
+    expect(deps.auditStore.entries[0]!.guardrail).toBe('intervened');
+  });
+
+  test('keeps the sources of an answer the guardrail only masked, and records it as masked', async () => {
+    const answerer = new ScriptedAnswerer(
+      'Ask the platform team at {EMAIL} to register the site [1].',
+      undefined,
+      'masked'
+    );
+    const { app, deps } = setup({ answerer });
+    const response = await app.request(
+      post('/chat', { query: 'Who registers a site?' }),
+      undefined,
+      READER
+    );
+    const body = (await response.json()) as { answer: string; citations: { id: string }[] };
+    expect(body.answer).toContain('{EMAIL}');
+    expect(body.citations.map((citation) => citation.id)).toEqual(['platform:onboarding']);
+    expect(deps.recordStore.exchanges[0]!.guardrail).toBe('masked');
+    expect(deps.auditStore.entries[0]!.guardrail).toBe('masked');
+    expect(deps.logs).toContainEqual(
+      expect.objectContaining({ outcome: 'answered', guardrail: 'masked' })
+    );
+  });
+
+  test('sends the question to the guardrail as the query, and as content its other policies check', async () => {
+    const { app, deps } = setup();
+    await app.request(post('/chat', { query: 'How do I add a site?' }), undefined, READER);
+    const blocks = deps.scriptedAnswerer.requests[0]!.messages.at(-1)!.content;
+    expect(blocks).toContainEqual({
+      guardContent: {
+        text: { text: 'How do I add a site?', qualifiers: ['query', 'guard_content'] },
+      },
+    });
   });
 
   test('limits retrieval to the sites asked for', async () => {
@@ -423,7 +457,8 @@ describe('POST /chat, refused', () => {
 
   test.each([
     ['an empty query', { query: '   ' }],
-    ['a query over 2,000 characters', { query: 'x'.repeat(2001) }],
+    // The guardrail's grounding check refuses a longer query, so the model could never answer it.
+    ['a query over 1,000 characters', { query: 'x'.repeat(1001) }],
     ['a malformed conversation ID', { query: 'Hi', conversationId: 'abc' }],
     ['an invalid site', { query: 'Hi', sites: ['Not A Slug'] }],
     ['an unknown mode', { query: 'Hi', mode: 'plan' }],
@@ -462,6 +497,26 @@ describe('other routes', () => {
     ]);
     expect(body.results[0]!.snippet).toContain('Register the site');
     expect(deps.scriptedAnswerer.requests).toHaveLength(0);
+  });
+
+  // Search has no guardrail, so it keeps the longer limit that /chat cannot.
+  test('POST /search takes a query of 2,000 characters, which /chat refuses, and no longer', async () => {
+    const { app } = setup();
+    const search = (length: number) =>
+      app.request(post('/search', { query: 'x'.repeat(length) }), undefined, READER);
+    expect((await search(2000)).status).toBe(200);
+    expect((await search(2001)).status).toBe(400);
+    const chat = (length: number) =>
+      app.request(post('/chat', { query: 'x'.repeat(length) }), undefined, READER);
+    expect((await chat(1000)).status).toBe(200);
+    const tooLong = await chat(1001);
+    expect(tooLong.status).toBe(400);
+    expect(await tooLong.json()).toMatchObject({
+      error: {
+        code: 'invalid-request',
+        message: 'query: ask in 1,000 characters or fewer, or use Search.',
+      },
+    });
   });
 
   test('GET /documents/{id} returns a document, 404 for a missing one, 400 for a bad ID', async () => {

@@ -121,20 +121,106 @@ describe('BedrockAnswerer', () => {
       guardrailIdentifier: 'g-1',
       guardrailVersion: '3',
       streamProcessingMode: 'sync',
+      trace: 'enabled',
     });
   });
 
-  test('reports a guardrail intervention', async () => {
+  /** A stream that the guardrail stopped, ending with the trace it reports. */
+  const intervened = (trace?: object) =>
     async function* stream() {
+      yield { contentBlockDelta: { contentBlockIndex: 0, delta: { text: 'Reply.' } } };
       yield { messageStop: { stopReason: 'guardrail_intervened' as const } };
-    }
+      yield {
+        metadata: {
+          usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+          metrics: { latencyMs: 1 },
+          ...(trace ? { trace: { guardrail: trace } } : {}),
+        },
+      };
+    };
+  const answered = async (stream: () => AsyncGenerator<unknown>) => {
     bedrock.on(ConverseStreamCommand).resolves({ stream: stream() } as never);
     const answerer = new BedrockAnswerer(new BedrockRuntimeClient({}), 'm');
-    const events = [];
+    const events: AnswerEvent[] = [];
     for await (const event of answerer.stream({ system: 's', messages: [], maxTokens: 10 })) {
       events.push(event);
     }
-    expect(events).toEqual([{ type: 'started' }, { type: 'guardrail' }]);
+    return events;
+  };
+
+  test('reports a question the guardrail blocked, after the usage', async () => {
+    const events = await answered(
+      intervened({
+        inputAssessment: {
+          g1: {
+            topicPolicy: { topics: [{ name: 'MedicalAdvice', type: 'DENY', action: 'BLOCKED' }] },
+          },
+        },
+      })
+    );
+    expect(events).toEqual([
+      { type: 'started' },
+      { type: 'delta', text: 'Reply.' },
+      { type: 'usage', usage: { inputTokens: 0, outputTokens: 0 } },
+      { type: 'guardrail', action: 'blocked' },
+    ]);
+  });
+
+  test('reports an answer the guardrail blocked, though it masked something too', async () => {
+    const events = await answered(
+      intervened({
+        outputAssessments: {
+          g1: [
+            {
+              sensitiveInformationPolicy: {
+                piiEntities: [
+                  { match: 'someone@example.org', type: 'EMAIL', action: 'ANONYMIZED' },
+                ],
+                regexes: [],
+              },
+            },
+            {
+              contextualGroundingPolicy: {
+                filters: [{ type: 'GROUNDING', threshold: 0.6, score: 0.2, action: 'BLOCKED' }],
+              },
+            },
+          ],
+        },
+      })
+    );
+    expect(events.at(-1)).toEqual({ type: 'guardrail', action: 'blocked' });
+  });
+
+  // Masking stops the stream as `guardrail_intervened` too; only the trace says the answer still stands.
+  test('reports an answer the guardrail only masked, without what it matched', async () => {
+    const events = await answered(
+      intervened({
+        modelOutput: ['Write to someone@example.org.'],
+        outputAssessments: {
+          g1: [
+            {
+              sensitiveInformationPolicy: {
+                piiEntities: [
+                  { match: 'someone@example.org', type: 'EMAIL', action: 'ANONYMIZED' },
+                ],
+                regexes: [],
+              },
+              contextualGroundingPolicy: {
+                filters: [{ type: 'GROUNDING', threshold: 0.6, score: 0.9, action: 'NONE' }],
+              },
+            },
+          ],
+        },
+        actionReason: 'No action.\nGuardrail masked.',
+      })
+    );
+    expect(events.at(-1)).toEqual({ type: 'guardrail', action: 'masked' });
+    expect(JSON.stringify(events)).not.toContain('someone@example.org');
+  });
+
+  test('takes an intervention that comes without a trace as a block', async () => {
+    const events = await answered(intervened());
+    expect(events.at(-1)).toEqual({ type: 'guardrail', action: 'blocked' });
   });
 
   // A refused request bills nothing, so the chat must not hold it against the reader as a started answer.

@@ -6,10 +6,15 @@ export interface Turn {
   readonly answer: string;
 }
 
+/**
+ * What a guard content block is to the guardrail. `grounding_source` and `query` are read by the grounding check
+ * only; `guard_content` puts the block through every other policy too.
+ */
+export type GuardQualifier = 'grounding_source' | 'query' | 'guard_content';
+
 /** A message for the model, in the Converse API's shape. */
 export type MessageContent =
-  | { text: string }
-  | { guardContent: { text: { text: string; qualifiers: ('grounding_source' | 'query')[] } } };
+  { text: string } | { guardContent: { text: { text: string; qualifiers: GuardQualifier[] } } };
 
 export interface Message {
   role: 'user' | 'assistant';
@@ -18,6 +23,13 @@ export interface Message {
 
 /** Turns of history kept in the prompt: enough for follow-up questions, few enough to keep cost flat. */
 export const HISTORY_TURNS = 6;
+
+/**
+ * The longest question `/chat` takes. The guardrail's grounding check refuses a query over one text unit, 1,000
+ * characters, with a `ValidationException` before the model is called, so a longer question could never be answered
+ * (dev, 2026-11-20). Search has no guardrail and takes `MAX_QUESTION_CHARACTERS`.
+ */
+export const MAX_CHAT_QUESTION_CHARACTERS = 1000;
 
 export const SYSTEM_PROMPT = [
   'You are OrcaSonar, the documentation assistant for UMCCR, the University of Melbourne Centre for Cancer Research.',
@@ -39,7 +51,11 @@ export const formatSources = (passages: readonly Passage[]): string =>
 
 /**
  * The conversation for the model. The latest question and its sources go in guard content blocks, so the guardrail's
- * grounding check knows which text is the source and which the query.
+ * grounding check knows which text is the source and which the query. A block qualified only as `grounding_source` or
+ * `query` is checked by nothing else, so the question is guard content as well: the denied topics and the personal-data
+ * filters check it before the model is called, and a question they block costs no model tokens. The sources stay out
+ * of those checks. Once any block is guard content, the guardrail checks nothing outside such blocks, so earlier turns
+ * are not checked again (AWS, "Include a guardrail with the Converse API").
  */
 export const buildMessages = (
   question: string,
@@ -58,7 +74,7 @@ export const buildMessages = (
         guardContent: { text: { text: formatSources(passages), qualifiers: ['grounding_source'] } },
       },
       { text: 'Question:' },
-      { guardContent: { text: { text: question, qualifiers: ['query'] } } },
+      { guardContent: { text: { text: question, qualifiers: ['query', 'guard_content'] } } },
     ],
   },
 ];

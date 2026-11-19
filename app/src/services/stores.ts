@@ -1,3 +1,4 @@
+import type { GuardrailOutcome } from './answer';
 import type { Turn } from './prompt';
 
 /**
@@ -41,7 +42,7 @@ export interface ExchangeRecord {
   readonly modelId?: string;
   readonly usage?: { inputTokens: number; outputTokens: number };
   readonly costUsd: number;
-  readonly guardrail: 'none' | 'intervened';
+  readonly guardrail: GuardrailOutcome;
   readonly latencyMs: number;
 }
 

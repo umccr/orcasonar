@@ -193,6 +193,7 @@ export const auditConversations = (
     conversation.costUsd += entry.costUsd ?? 0;
     conversation.inputTokens += entry.usage?.inputTokens ?? 0;
     conversation.outputTokens += entry.usage?.outputTokens ?? 0;
+    // Blocked answers only: a masked answer stood, with its sources.
     if (entry.guardrail === 'intervened') {
       conversation.guardrailInterventions += 1;
     }

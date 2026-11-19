@@ -18,7 +18,7 @@ What runs in each stage, component by component, and how a question, ingestion, 
 | Sonar KMS key          | stateful  | Encrypts the buckets, the table, the guardrail and the knowledge base's index. Rotated yearly.                                                                                                                                                             |
 | Ingest bucket          | stateful  | The knowledge base's only input. Only the docs platform's `docs-publisher` role writes, and only under `docs/`. Versioned, with replaced versions kept 30 days.                                                                                            |
 | Managed knowledge base | stateful  | AWS-managed vector store, embeddings, hybrid search and reranker. One data source, `docs`, on the ingest bucket's `docs/` prefix.                                                                                                                          |
-| Guardrail              | stateful  | Denied topics (medical advice about a person, personal data about patients), masking of emails and phone numbers, blocking of AWS keys and passwords, and a grounding check against the retrieved passages.                                                |
+| Guardrail              | stateful  | Checks questions and answers for denied topics (medical advice about a person, personal data about patients) and AWS keys and passwords; masks emails and phone numbers in answers; checks answers' grounding in the retrieved passages.                   |
 | Records bucket         | stateful  | One JSON record per exchange under `records/`, and feedback under `feedback/`, deleted after 30 days. `eval-set/` is kept.                                                                                                                                 |
 | DynamoDB table         | stateful  | Spend counters, conversation turns, the audit log (with an index by time and one by caller) and the ingestion state, with point-in-time recovery.                                                                                                          |
 
@@ -36,7 +36,10 @@ stateful resources through SSM parameters under `/orcasonar/`.
    little to search for, so it is searched for with the question before it.
 4. With no passages, it says the documentation does not cover the question, without calling the model.
 5. Otherwise it calls Claude through `ConverseStream` with the guardrail, the passages as the grounding source and the
-   question as the query, and streams each piece of the answer as a `delta` event.
+   question as the query, which the denied topics and the personal-data filters check too. A question the guardrail
+   refuses gets its message without the model being called. Each piece of the answer streams as a `delta` event. The
+   guardrail's trace, which comes with the usage, tells an answer it blocked, which lists no citations, from one it only
+   masked, which keeps them.
 6. It prices the exchange from the tokens used, settles the hold at that cost, and sends `citations`, the passages the
    answer cites. It saves the turn, the record and the audit entry, then sends `done` with the usage and cost. A write
    that fails is logged as `write-error` and raises an alarm, but cannot fail an answer the reader already has.
@@ -94,7 +97,7 @@ Both limits renew at midnight in Melbourne; the month's budget is in `infrastruc
 ## Records and evaluation
 
 Each exchange is written to `records/date=YYYY-MM-DD/<exchangeId>.json`: the question, the answer, the cited sources
-and their scores, the model, tokens, cost, response time, whether the guardrail intervened, and the caller's `sub`.
+and their scores, the model, tokens, cost, response time, whether the guardrail blocked or masked the answer, and the caller's `sub`.
 Feedback goes under `feedback/`. Both are deleted after 30 days; `eval-set/` keeps chosen examples without caller IDs
 ([runbook](runbook.md#read-the-records)). The table keeps the same exchanges, failed ones too, as the audit log, with
 the reader's email ([audit API](api.md#the-audit-log)).
