@@ -18,21 +18,21 @@
     "node": ">=24"
   },
   "dependencies": {
-    "@aws-sdk/client-bedrock-agent": "^3.1141.0",
-    "@aws-sdk/client-bedrock-agent-runtime": "^3.1141.0",
-    "@aws-sdk/client-bedrock-runtime": "^3.1141.0",
-    "@aws-sdk/client-dynamodb": "^3.1141.0",
-    "@aws-sdk/client-s3": "^3.1141.0",
-    "@aws-sdk/client-ssm": "^3.1141.0",
-    "@aws-sdk/lib-dynamodb": "^3.1141.0",
+    "@aws-sdk/client-bedrock-agent": "^3.1172.0",
+    "@aws-sdk/client-bedrock-agent-runtime": "^3.1172.0",
+    "@aws-sdk/client-bedrock-runtime": "^3.1172.0",
+    "@aws-sdk/client-dynamodb": "^3.1172.0",
+    "@aws-sdk/client-s3": "^3.1172.0",
+    "@aws-sdk/client-ssm": "^3.1172.0",
+    "@aws-sdk/lib-dynamodb": "^3.1172.0",
     "@hono/aws-lambda": "^1.0.1",
     "aws-jwt-verify": "^5.2.1",
-    "hono": "^4.12.27",
-    "zod": "^4.4.3"
+    "hono": "^4.13.19",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
-    "@hono/node-server": "^2.0.6",
+    "@hono/node-server": "^2.1.9",
     "@types/aws-lambda": "^8.10.163",
     "@types/node": "^26.5.1",
     "aws-sdk-client-mock": "^4.1.0",

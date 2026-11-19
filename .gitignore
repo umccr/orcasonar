@@ -13,6 +13,9 @@ cdk.out
 .vscode
 .DS_Store
 
+# Coding agents' plans, reports and reviews
+.agents/
+
 # umccr-docs build and preview output, for the docs.umccr.org site
 .umccr-docs
 
