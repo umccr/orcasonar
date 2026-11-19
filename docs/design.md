@@ -1,14 +1,8 @@
 # OrcaSonar design
 
-OrcaBus runs the pipelines and workflows, OrcaHouse holds the data, and OrcaSonar finds the knowledge and
-documentation behind them. A question goes down; passages and an answer come back, with links to where they came
-from. The first release answers questions about UMCCR documentation for the chat panel on docs.umccr.org, through one
-small API.
-
-Designed on 9 October 2026, built in October 2026 and deployed to dev. Prices and AWS details were checked on 8 and 9
-October 2026. This page is the design and the reasons for it; [architecture.md](architecture.md) describes what is
-deployed in detail, [api.md](api.md) the API, [deploy.md](deploy.md) how to deploy it and [runbook.md](runbook.md)
-how to operate it.
+The decisions behind OrcaSonar and the reasons for them, with its diagrams and costs. Designed on 2026-10-09, with
+prices and AWS details checked on 2026-10-08 and 2026-10-09. What is deployed is in [architecture.md](architecture.md)
+and the API in [api.md](api.md).
 
 Related, in `umccr/docs-platform`: the
 [docs.umccr.org platform design](https://github.com/umccr/docs-platform/blob/main/docs/design/docs.umccr.org%20Platform%20Design.md)
@@ -16,42 +10,30 @@ and [ADR-0007, chat through OrcaSonar](https://github.com/umccr/docs-platform/bl
 
 ## Decisions
 
-| Topic                 | Decision                                                                                                                                                                                                                        | Status                                        |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------- |
-| Repository            | `umccr/orcasonar`, with its own two pipelines, one per stack.                                                                                                                                                                   | built                                         |
-| Address               | `sonar.<stage>.umccr.org`: `sonar.dev.umccr.org`, `sonar.stg.umccr.org`, `sonar.prod.umccr.org`. `sonar.umccr.org` can follow if a page for people ever lives there.                                                            | built in dev                                  |
-| Streaming             | `/chat` streams from the first release, through an API Gateway REST API with response streaming.                                                                                                                                | built                                         |
-| Callers               | The docs chat panel and OrcaUI: ID tokens from the `docs-app` and OrcaUI (`orcaui-app-<stage>`) Cognito clients, and from those pages' hosts for CORS. In beta, the `localhost` client too, for portal apps run locally.        | built                                         |
-| Open routes           | API Gateway answers every route that needs no token itself, from mock integrations. Every Lambda integration is behind the authorizer. See [what a request can reach](#what-a-request-can-reach).                               | built, after a Security Hub finding (October) |
-| API docs              | Swagger UI at `/schema/swagger-ui/` and the contract at `/schema/openapi.json`, on each stage, as the OrcaBus services serve theirs.                                                                                            | built                                         |
-| Sources in release 1  | UMCCR documentation only, from docs.umccr.org. Databases and APIs for real data come later.                                                                                                                                     | built                                         |
-| Knowledge base        | Bedrock managed knowledge base, serverless and pay as you go, with the default minimal configuration.                                                                                                                           | built                                         |
-| Questions and answers | Kept 30 days in a bucket, for evaluation.                                                                                                                                                                                       | built                                         |
-| Audit log             | Who asked what and the answer, with the reader's email, kept 30 days in the Sonar table. `/api/v1/audit/*` lists it, and usage per reader, for the data-portal `admin` group in prod; in beta, for now, for any accepted token. | built in dev                                  |
-| Name                  | OrcaSonar; `orcasonar` for the repository, stacks and SSM names.                                                                                                                                                                | decided                                       |
-| Model                 | Claude Sonnet 5 through the Australian cross-Region profile; Haiku 4.5 is allowed too, if its answers are good enough.                                                                                                          | built; blocked in dev by the region policy    |
-| Budget                | $50 a month in prod and $10 in dev and stg, enforced by OrcaSonar itself, with an AWS Budgets backstop.                                                                                                                         | built                                         |
+| Topic          | Decision, and why                                                                                                                                                                                                                                          |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Repository     | `umccr/orcasonar`, with two pipelines, one per stack.                                                                                                                                                                                                      |
+| Address        | `sonar.<stage>.umccr.org`; `sonar.umccr.org` can follow if a page for people ever lives there.                                                                                                                                                             |
+| API            | A regional API Gateway REST API, because the HTTP APIs OrcaBus services use cannot stream and stop at 30 seconds. Versioned under `/api/v1`, so `/api/v2` can sit beside it, and every error has one shape, API Gateway's own included ([api.md](api.md)). |
+| Callers        | Cognito ID tokens, the way the portal calls OrcaBus, from named clients only: `docs-app`, OrcaUI's and, in beta, `localhost`. Not OrcaBus's whole list, which includes a client for machine tokens: machine callers wait for caps of their own.            |
+| API docs       | Swagger UI and the contract served on each stage, as the OrcaBus services serve theirs.                                                                                                                                                                    |
+| Sources        | UMCCR documentation only. Databases and APIs for real data come later, each as its own data source with its own access rules.                                                                                                                              |
+| Knowledge base | A Bedrock managed knowledge base, serverless and pay per use, in its default configuration: managed embeddings, hybrid search and the managed reranker.                                                                                                    |
+| Model          | Claude Sonnet 5 through the Australian cross-Region profile; Haiku 4.5 is allowed too, if its answers are good enough.                                                                                                                                     |
+| `doc_id`       | `<slug>:<path>`, such as `platform:onboarding`, so citations, `/documents/{id}` and docs links agree.                                                                                                                                                      |
 
 ## The name
 
-Sonar sends out a signal and reads back the shape of what lies below the surface. Retrieval does the same: a query
-goes down, and the documents that match come back. The name also follows the house pattern of Orca plus what the
-thing is, as in orcabus, orcahouse, orcavault and orcaglue. "Sonar" on its own is SonarQube and SonarCloud, which no
-UMCCR repository uses, and Perplexity's Sonar API, so the repository, stacks and parameters use `orcasonar` in full.
-
-| Name                   | The idea                                             | Against it                                                                |
-| ---------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------- |
-| **OrcaSonar** (chosen) | Send a question down; read back what lies beneath    | SonarQube, SonarCloud and Perplexity's Sonar API exist in the wider world |
-| OrcaEcho               | Orcas echolocate; the echo is the answer coming back | Amazon Echo, in an AWS-heavy organisation                                 |
-| OrcaLore               | Orca pods pass knowledge down the generations        | sounds less like search, and slightly like a game                         |
-| OrcaFathom             | To fathom is to understand, and to sound the depth   | Fathom, the AI notetaker, and Fathom Analytics                            |
-| Orcasound              |                                                      | avoid: an existing open-source orca hydrophone project                    |
+Sonar sends a signal down and reads back the shape of what lies below; retrieval does the same with a question. The
+name follows the house pattern of Orca plus what the thing is, as in orcabus, orcahouse, orcavault and orcaglue.
+"Sonar" alone is SonarQube, SonarCloud and Perplexity's Sonar API, so names use `orcasonar` in full. Also considered:
+OrcaEcho (Amazon Echo, in an AWS-heavy organisation), OrcaLore (sounds less like search), OrcaFathom (Fathom, the AI
+notetaker) and Orcasound, an existing orca hydrophone project.
 
 ## At a glance
 
-Two stacks in each stage account, each deployed by its own pipeline. Callers reach OrcaSonar only through the API,
-and the only thing that writes into it is the docs site pipeline. Everything it stores, the index included, is
-encrypted with one Sonar KMS key. Ingestion and the budget have their own diagrams below.
+Callers reach OrcaSonar only through the API, and only the docs site pipeline writes into it.
+[architecture.md](architecture.md#components) describes each part.
 
 ```mermaid
 flowchart TB
@@ -91,27 +73,11 @@ flowchart TB
     ingest -- "indexed when changed" --> kb
 ```
 
-Release 1 has one caller; the later ones are drawn to make room for them, not because they are planned for a date.
-
-| Part                   | What it does, and why                                                                                                                                                                                                                                                                                                                                        |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| AWS WAF                | AWS managed rule groups and a rate limit per address. The common rules that look for paths, HTML and addresses in a request body only count, since questions about `../` links, HTML tags and internal URLs trip them. An allowlist of university and VPN ranges can be added if a review asks for one; it would also block readers at home without the VPN. |
-| API Gateway REST API   | Regional, with the custom domain on the certificate and hosted zone each stage already has. A REST API rather than the HTTP API OrcaBus services use, because HTTP APIs can't stream and stop at 30 seconds. Answers the open routes itself.                                                                                                                 |
-| Lambda authorizer      | Verifies the Cognito ID token with `aws-jwt-verify`: the `data-portal-<stage>` pool, token use `id`, and an allowed client: `docs-app`, OrcaUI's client and, in beta, the `localhost` client, named one by one rather than OrcaBus's whole list, which also holds a client for machine tokens. `docs-app` never goes on the OrcaBus API list.                |
-| Chat Lambda            | Holds the most an answer can cost against the budget, retrieves, builds the prompt, calls Claude with the guardrail, streams server-sent events, then settles the hold at the answer's cost and records the exchange. Logs hold the reader's `sub` and the outcome, never the question.                                                                      |
-| Query Lambda           | `/search`, `/documents/{id}`, `/feedback` and the reader's own history, `/chat/history` and `/chat/history/{id}`, answered as ordinary JSON. History is read through the audit log's index by caller, with the caller from the token, and holds nothing the audit log adds about the reader.                                                                 |
-| Audit Lambda           | `/audit/exchanges`, `/audit/conversations`, `/audit/conversations/{id}` and `/audit/usage`: who asked what, the answers, conversations with their totals, and usage per reader. Only members of the data-portal pool's `admin` group get past it; it reads only the table, and logs who read what without logging what it returned.                          |
-| Sonar table            | One DynamoDB table: spend per reader per day, team spend per month, conversation turns and the audit log (both expire after 30 days) and the ingestion state. Callers are keyed by `sub` for people and by client ID for machine callers.                                                                                                                    |
-| Ingest bucket          | The only input to the knowledge base. Only the docs pipeline's `docs-publisher` role writes, and only under `docs/`. Versioned, so an accidental delete is recoverable.                                                                                                                                                                                      |
-| Managed knowledge base | One per stage: managed embeddings, hybrid search and the managed reranker. Each passage keeps its page's `doc_id`, `url`, `site` and `title`, so sources become links and a question can stay within one site.                                                                                                                                               |
-| Guardrail              | Applied to every model call: denied topics (medical advice about a person, personal data about patients), masking of personal data in answers, and a grounding check that flags answers the passages don't support.                                                                                                                                          |
-| Claude Sonnet 5        | Called through the `au.` inference profile, which runs only in Sydney and Melbourne. Haiku 4.5 is the cheaper option if its answers are good enough.                                                                                                                                                                                                         |
-
 ## What a request can reach
 
-The API has to be reachable from readers' browsers, so it is internet-facing. What keeps it safe is that a request
-without a valid token runs no code of ours: WAF filters first, API Gateway answers the open routes from fixed
-responses, and everything else needs the authorizer's approval before a function runs.
+The API is internet-facing because readers' browsers call it. What keeps it safe is that a request without a valid
+token runs no code of ours: WAF filters first, API Gateway answers the open routes from fixed responses, and
+everything else needs the authorizer's approval before a function runs.
 
 ```mermaid
 flowchart TD
@@ -125,49 +91,18 @@ flowchart TD
     route -- "anything else" --> missing["404 not-found, from API Gateway"]
 ```
 
-`/health` used to be served by the query Lambda without a token. Security Hub flagged that as potential unauthorised
-access: a function with access to the knowledge base, the ingest bucket and the records bucket was reachable through an
-API Gateway method without authorisation. API Gateway now answers `/health` itself with
-`{"status": "ok", "version": "<commit>", "stage"}`, fixed at deploy time, and the same mechanism serves the API docs.
-A stack test, `reaches a function only through the authorizer`, fails if any open method integrates a Lambda.
+`/health` was first served by the query Lambda without a token, and Security Hub flagged it: a function that reads
+the knowledge base and both buckets was reachable without authorisation. API Gateway now answers `/health` itself
+with `{"status": "ok", "version": "<commit>", "stage"}`, fixed at deploy time, and serves the API docs the same way.
+The stack test `reaches a function only through the authorizer` fails if an open method integrates a Lambda.
 
-The open routes give up nothing: `/health` says the domain, WAF and API Gateway are up but never touches a function
-or Bedrock, so it can't run up cost, and the contract is not a secret. The authorizer's answer is cached for five
-minutes per token, and its policy allows every route of the stage, so a token valid for one route is valid for all.
-
-## The API
-
-Version 1 lives under `https://sonar.<stage>.umccr.org/api/v1`, and each stage documents itself at
-`/schema/swagger-ui/`. Every endpoint but `/health` needs a Cognito ID token in `Authorization: Bearer`, the way the
-portal calls OrcaBus. Responses are JSON, except `/chat`, which streams when asked to. Errors share one shape:
-`{"error": {"code", "message", "retryAfter"?}}`. Requests, the stream, every error code and the limits are in
-[api.md](api.md).
-
-| Method and path                        | Token            | Request                                          | Response                                                                                                                                                           | Status |
-| -------------------------------------- | ---------------- | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------ |
-| `POST /api/v1/chat`                    | yes              | `{query, conversationId?, sites?, mode?}`        | with `Accept: text/event-stream`, events `meta`, `delta`…, `citations`, `done`; otherwise one JSON object with the answer, citations, `exchangeId`, usage and cost | built  |
-| `POST /api/v1/search`                  | yes              | `{query, topK?, sites?}`, `topK` up to 20        | `{results: [{id, title, url, site, snippet, score}]}`, with no model call                                                                                          | built  |
-| `GET /api/v1/documents/{id}`           | yes              | a `doc_id`, URL-encoded                          | `{id, title, url, site, updated, markdown}`                                                                                                                        | built  |
-| `GET /api/v1/chat/history`             | yes              | `limit?, cursor?`                                | the caller's own conversations of the last 30 days, most recent first, each titled by its first question                                                           | built  |
-| `GET /api/v1/chat/history/{id}`        | yes              | a `conversationId` of the caller's               | the conversation's questions and answers with their citations, without cost, tokens or the reader's email                                                          | built  |
-| `POST /api/v1/feedback`                | yes              | `{exchangeId, rating, comment?}`                 | `204`                                                                                                                                                              | built  |
-| `GET /api/v1/audit/exchanges`          | yes, admin group | `from?, to?, caller?, outcome?, limit?, cursor?` | the audit log, newest first: who asked, the question, the start of the answer, outcome and cost                                                                    | built  |
-| `GET /api/v1/audit/conversations`      | yes, admin group | `from?, to?, caller?, outcome?, limit?, cursor?` | the window's conversations, most recently active first, with their questions, outcomes, tokens and cost                                                            | built  |
-| `GET /api/v1/audit/conversations/{id}` | yes, admin group | a `conversationId`                               | the whole conversation with full answers and sources                                                                                                               | built  |
-| `GET /api/v1/audit/usage`              | yes, admin group | `from?, to?`                                     | questions, outcomes, tokens and cost per reader                                                                                                                    | built  |
-| `GET /api/v1/health`                   | no               |                                                  | `{status, version, stage}`, from API Gateway                                                                                                                       | built  |
-| `GET /schema/swagger-ui/`              | no               |                                                  | Swagger UI for the contract                                                                                                                                        | built  |
-| `GET /schema/openapi.json`             | no               |                                                  | the contract, for clients and for AgentCore Gateway to turn into MCP tools                                                                                         | built  |
-| `GET /api/v1/sources`                  | yes              |                                                  | what is indexed, per source: documents and the last sync                                                                                                           | later  |
-| `GET /api/v1/usage`                    | yes              |                                                  | the caller's allowance left today                                                                                                                                  | later  |
-
-`doc_id` is a site's slug and a page's path, such as `platform:onboarding`, so citations, `/documents/{id}` and docs
-links all agree. `mode` is reserved for a later Plan mode; release 1 answers in Ask mode only.
+The open routes give nothing away: they touch no function and no Bedrock, so they cannot run up cost, and the
+contract is not secret. The authorizer's answer is cached five minutes per token, and its policy allows every route
+of the stage, so a token valid for one route is valid for all.
 
 ## One question, end to end
 
-The first words reach the reader as soon as Claude writes them; the citations follow the answer. Search stops after
-the retrieval and returns the passages as JSON, from the query Lambda.
+The answer streams as the guardrail releases it, and the citations follow. Search stops after the retrieval.
 
 ```mermaid
 sequenceDiagram
@@ -210,14 +145,10 @@ sequenceDiagram
 
 ## Ingestion
 
-OrcaSonar doesn't read GitHub or docs.umccr.org. The docs site pipeline hands it documents: each publish uploads the
-site's pages as processed Markdown, each with a metadata file, and deletes the ones no longer published. OrcaSonar
-indexes whatever is in the bucket.
-
-Ingestion jobs on one data source can't overlap, and many sites can publish at once, so a scheduled check starts at
-most one job at a time instead of each publish starting its own. The index stays marked stale until a job completes:
-a job that fails raises an alarm, and the next check starts another. A push is usually searchable within about 20
-minutes.
+OrcaSonar reads neither GitHub nor docs.umccr.org: each site's publish uploads its pages to the ingest bucket, and
+OrcaSonar indexes whatever is there. Ingestion jobs on one data source cannot overlap, and many sites can publish at
+once, so a scheduled check starts one job at a time rather than one per publish. A push is usually searchable within
+about 20 minutes. [architecture.md](architecture.md#ingestion) has the mechanism and the metadata format.
 
 ```mermaid
 flowchart TB
@@ -235,67 +166,35 @@ flowchart TB
     run -. "once the job completes: clear the mark,<br/>unless a newer change set it" .-> flag
 ```
 
-The metadata file for `docs/platform/onboarding.md`, written by the docs toolkit's `export-kb`:
-
-```json
-{
-  "metadataAttributes": {
-    "doc_id": "platform:onboarding",
-    "site": "platform",
-    "title": "Onboarding a site",
-    "url": "https://docs.umccr.org/platform/onboarding/",
-    "commit": "3f2c9e1",
-    "updated": "2026-10-09"
-  }
-}
-```
-
-Each metadata file sits beside its page, as `<page>.md.metadata.json`, which is where the managed S3 connector looks
-when the data source names no metadata prefix. Retrieval filters on `site` when a question names sites. Later
-sources, such as OrcaBus API docs or OrcaHouse schemas, each get their own data source and their own access rules
-rather than sharing `docs`.
-
 ## Keeping the data on our side
 
-The data stays inside AWS in Australia, under our own key, with no public or anonymous access to anything that holds
-it. One nuance: the managed knowledge base keeps the index in AWS-managed storage, encrypted with our key, rather than
-in a resource in our account.
-
-| Data                            | Where it lives                         | Control                                                                                                                                                                |
-| ------------------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Source documents                | the ingest bucket, Sydney              | public access blocked; Sonar KMS key; only `docs-publisher` writes, only OrcaSonar reads                                                                               |
-| The index: chunks and vectors   | Bedrock's managed vector store, Sydney | encrypted with the Sonar KMS key, chosen when the knowledge base is created; AWS-managed storage, not a resource in our account                                        |
-| Embedding and reranking         | service-managed models                 | AWS doesn't say where they run: ask before indexing anything sensitive. Bringing Titan Text Embeddings V2 instead switches off the managed reranker                    |
-| Questions and answers in flight | Claude, `au.` profile                  | processed in Sydney and Melbourne only. Bedrock keeps no prompts or answers and doesn't train on them; model providers have no access to the accounts where models run |
-| Our records                     | Sonar table, records bucket, logs      | our account and our key; deleted after 30 days; logs never hold the question or the email; the audit log, with emails, is read only by the audit group                 |
+The data stays inside AWS in Australia, under our own key. One nuance: the managed knowledge base keeps the index in
+AWS-managed storage, encrypted with our key, rather than in a resource in our account.
+[architecture.md](architecture.md#data-and-privacy) lists where each kind of data lives.
 
 Making it enforceable rather than a default:
 
-1. **No data kept by Bedrock.** Set the account's Bedrock data-retention mode to `none` in ap-southeast-2, and add an
-   SCP that stops anyone changing it. Models that require retention then refuse to run. It is `inherit` in dev
-   today: an organisation administrator's decision.
-2. **Only the models we chose.** The chat role may stream only from the `au.` profiles for Sonnet 5 and Haiku 4.5,
-   and the models behind them in Sydney and Melbourne.
-3. **No outside sources.** Only the ingest bucket feeds the knowledge base: no web crawler, no external connectors.
-   OrcaSonar calls nothing outside AWS.
-4. **No anonymous access to data.** Every route that reaches a function needs a token, behind WAF and throttling
-   ([what a request can reach](#what-a-request-can-reach)). A truly private API would need a VPN for every reader; a
-   WAF allowlist of university and VPN ranges is the middle option.
-5. **Private network paths, optional.** VPC endpoints for `bedrock-runtime` and `bedrock-agent-runtime` keep
-   Lambda-to-Bedrock traffic off public endpoints. They cost about $35 to $40 a month across two availability zones,
-   nearly doubling the budget, so add them only if a security review asks.
+1. **No data kept by Bedrock.** Set the account's Bedrock data-retention mode to `none` in ap-southeast-2, with an SCP
+   that stops anyone changing it, so models that require retention refuse to run. It is `inherit` in dev: an
+   organisation administrator's decision.
+2. **Only the models we chose.** The chat role may stream only from the `au.` profiles for Sonnet 5 and Haiku 4.5, and
+   the models behind them in Sydney and Melbourne.
+3. **No outside sources.** Only the ingest bucket feeds the knowledge base, and nothing outside AWS is called.
+4. **No anonymous access.** Every route that reaches a function needs a token. A WAF allowlist of university and VPN
+   ranges is the middle option before a private API, though it blocks readers at home without the VPN.
+5. **Private network paths, optional.** VPC endpoints for `bedrock-runtime` and `bedrock-agent-runtime` would cost
+   about $35 to $40 a month across two availability zones, nearly doubling the budget, so they wait for a security
+   review that asks.
 6. **Assessed for Australian government use.** Bedrock is assessed at IRAP PROTECTED, excluding Bedrock Marketplace,
-   and AgentCore, which runs managed knowledge bases, was added in the 2026 assessment. The report is in AWS
-   Artifact.
+   and AgentCore, which runs managed knowledge bases, joined the 2026 assessment. The report is in AWS Artifact.
 
-If "on our side" must mean storage in our own account, use a self-managed knowledge base with S3 Vectors in our
-account and an embedding model run in Sydney. That gives up the managed reranker and hybrid search in exchange for
-placement we can prove.
+If "on our side" must mean storage in our own account, use a self-managed knowledge base with S3 Vectors and an
+embedding model run in Sydney. That gives up the managed reranker and hybrid search for placement we can prove.
 
 ## Cost, and keeping it under $50 a month
 
-Model tokens are almost the whole bill. After about $2 a month of fixed costs, $48 is left for questions: about
-$1.60 a day.
+Model tokens are almost the whole bill. After about $2 a month of fixed costs, $48 is left for questions: about $1.60
+a day.
 
 | Item                                              | Price                                                                                  |
 | ------------------------------------------------- | -------------------------------------------------------------------------------------- |
@@ -324,27 +223,18 @@ flowchart TD
     backstop["AWS Budgets: Bedrock spend<br/>past the month's budget"] -. "attaches a policy denying<br/>Bedrock to the chat role" .-> answer
 ```
 
-1. **Count dollars, not questions.** Bedrock returns the tokens used by every answer, so the chat Lambda prices each
-   exchange and adds it to the Sonar table. Before the answer, it holds more than any answer can cost against the
-   caller's and the team's spend, in one conditional write, so answers asked at once can't all pass a check that each
-   would pass alone; the answer's cost then replaces the hold.
-2. **A team allowance per day**: the money left this month divided by the days left. It starts near $1.60 and unused
-   budget carries forward. When it runs out, Ask returns `429 over-budget` until tomorrow; Search keeps working, as
-   it costs a tenth of a cent.
-3. **A cap per caller of $0.40 a day**, about 20 answers. It takes four readers at their cap to use up a day, so one
-   person can't block everyone else. Machine callers, later, get their own caps by client ID.
-4. **Limits per request**: 2,000 characters of question, six turns of history, eight passages and 1,000 output
-   tokens keep the most expensive single answer under about 8 cents.
-5. **A backstop**: an AWS Budgets action that notifies at 80% and, at 100%, attaches a policy denying Bedrock to the
-   chat role. Budgets data updates only a few times a day, so the table is the real control.
-
-Answering with Haiku 4.5 instead stretches the same budget by about 70%.
+Dollars, not questions, because answers vary in cost and Bedrock reports each one's tokens. Each day's allowance is
+what is left of the month over the days left, so unused budget carries forward. A caller's cap of $0.40, about 20
+answers, means it takes four readers at their cap to use up a day. The per-request limits keep any answer under about
+8 cents, so the $0.10 hold covers it, and holding first stops answers asked at once from all passing a check that each
+would pass alone. AWS Budgets is only a backstop, since its data updates a few times a day. Search, at a tenth of a
+cent, keeps working when the allowance is spent; Haiku 4.5 would stretch the budget by about 70%.
+[architecture.md](architecture.md#budget) has the mechanism.
 
 ## Questions and answers: 30 days, for evaluation
 
-Every exchange is kept for 30 days in a private bucket and then deleted. Examples worth keeping longer are copied,
-without reader identifiers, into an evaluation set that measures answer quality before anything changes. The docs
-chat panel tells readers that questions are kept for 30 days to improve answers.
+Examples worth keeping longer are copied, without reader IDs, into an evaluation set that tests changes before they
+ship. The chat panel tells readers that questions are kept 30 days to improve answers.
 
 ```mermaid
 flowchart LR
@@ -356,30 +246,21 @@ flowchart LR
     eval --> job["Bedrock evaluation job, before a change<br/>to the model, prompt or retrieval ships"]
 ```
 
-A record holds the question, the answer, the cited documents and scores, the model, tokens, cost, response time,
-whether the guardrail intervened, and the reader's Cognito `sub`. Only the platform team should read the bucket;
-today that rests on who has access to the account, not on a bucket policy.
+Only the platform team should read the records; today that rests on who has access to the account, not on a bucket
+policy.
 
-The same exchanges, and the failed ones, also go into an audit log in the Sonar table, with the reader's email from
-their ID token, and expire after the same 30 days. The audit API lists them, and usage per reader, to members of the
-data-portal pool's `admin` group, so portal administrators can read everyone's questions there without account
-access. The group is one setting (`AUDIT_GROUP`), so a group of OrcaSonar's own can replace it. Each read is logged
-with who made it. The email stays out of the logs and the records bucket, so the weekly review and the evaluation
-set are unchanged.
+The audit log keeps the same exchanges, failed ones too, with the reader's email, so portal administrators can review
+them through the API without account access. Who may is one setting, `AUDIT_GROUP`, so a group of OrcaSonar's own can
+replace `admin`. The email stays out of the logs and the records, and readers must be told about it before prod
+([open items](project.md#open-items)).
 
-Before readers use the audit log in prod, the docs chat panel's notice should say so: that questions are kept for 30
-days to improve answers, and that UMCCR administrators can review them with the reader's email.
-
-Bedrock's model invocation logging is a setting for the whole account and Region and would capture every Bedrock call
-with full prompts. OrcaSonar writes its own records instead; leave invocation logging off unless OrcaSonar is the
+Bedrock's model invocation logging is a setting for the whole account and Region, and would capture every Bedrock
+call with full prompts. OrcaSonar writes its own records instead: leave invocation logging off unless OrcaSonar is the
 account's only Bedrock user.
 
 ## Deploying
 
-Two pipelines in the toolchain account, `UMCCR-OrcaSonarStateful` and `UMCCR-OrcaSonarStateless`, built by
-`infrastructure/toolchain/deployment-pipeline.ts`: the OrcaBus pipeline construct, adapted so that nothing is named
-for OrcaBus. The stateless stack reads the stateful stack's resources from SSM, so in every account the stateful
-stack deploys first.
+Each stack has its own pipeline, so the data and the API deploy apart.
 
 ```mermaid
 flowchart LR
@@ -391,53 +272,12 @@ flowchart LR
     test & synth & beta & prod -. "failures" .-> slack["Slack alerts"]
 ```
 
-| Stack                     | Holds                                                                                                                                                       | Why it is separate                                   |
-| ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
-| `OrcaSonarStatefulStack`  | Sonar KMS key, ingest bucket and its policy for `docs-publisher`, records bucket, Sonar table, managed knowledge base and its `docs` data source, guardrail | data and the index survive API changes; kept in prod |
-| `OrcaSonarStatelessStack` | REST API and custom domain, WAF, authorizer, chat, query and audit Lambdas, the API docs, ingestion scheduling, alarms, the AWS Budgets backstop            | changes often and is safe to replace                 |
+| Stack                     | Holds                                                                                                       | Why it is separate                                   |
+| ------------------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| `OrcaSonarStatefulStack`  | the Sonar KMS key, ingest and records buckets, Sonar table, knowledge base and its data source, guardrail   | data and the index survive API changes; kept in prod |
+| `OrcaSonarStatelessStack` | the API and its domain, WAF, the functions, the API docs, ingestion scheduling, alarms, the budget backstop | changes often and is safe to replace                 |
 
-What it reads and writes in SSM:
-
-| SSM parameter                                      | Direction | Used for                                                 |
-| -------------------------------------------------- | --------- | -------------------------------------------------------- |
-| `/umccr/certificate_arn`                           | read      | the API's custom domain                                  |
-| `/hosted_zone/umccr/id`, `/hosted_zone/umccr/name` | read      | the `sonar` alias record                                 |
-| `/data_portal/client/cog_user_pool_id`             | read      | the authorizer's user pool                               |
-| `/cognito/docs-app/app-client-id`                  | read      | the authorizer's allowed client: the docs chat panel     |
-| `/orcaui/cog_app_client_id_stage`                  | read      | the authorizer's allowed client: OrcaUI                  |
-| `/cognito/localhost-app/app-client-id`             | read      | beta's allowed client for portal apps run locally        |
-| `/orcasonar/ingest-bucket-name`                    | written   | the docs publish steps find the bucket                   |
-| `/orcasonar/api-url`                               | written   | the docs theme's `env.js`                                |
-| `/orcasonar/*`, the rest                           | written   | the stateless stack finds the stateful stack's resources |
-
-Watching it: alarms on failed answers and on writes that the chat Lambda logs rather than throws, on the API's 5XX
-responses, on Lambda crashes and timeouts, and on ingestion that could not be marked, scheduled or completed, beside
-the budget's 80% warning. Each tells one alerts topic as it fires and as it clears, and a team address or an AWS
-Chatbot channel subscribes to it. Still to build: a Synthetics canary. A canary on `/health` shows only that the
-domain, WAF and API Gateway are up, so a deeper one waits for a machine client that can call `/chat`.
-
-## Delivery
-
-1. **Spike in dev.** A managed knowledge base on a dev ingest bucket, filled from a prototype of `export-kb`, tried
-   with real questions. Done.
-2. **Stateful stack.** Key, ingest bucket, knowledge base, table, records bucket and guardrail. Deployed to dev; the
-   docs pipeline writes `docs/<slug>/` into it.
-3. **Stateless stack and the docs panel.** The REST API with streaming, WAF, the authorizer, both Lambdas, the budget,
-   alarms and the API docs. Deployed to dev, where the docs chat panel calls it and it answers (2026-10-15).
-4. **Later**, each when someone needs it: portal apps as callers, a machine client and AgentCore Gateway for AI
-   agents, `/sources` and `/usage`, a Plan mode, and the first real-data sources, OrcaHouse tables or OrcaBus APIs,
-   each as its own data source or tool with its own access rules.
-
-To confirm, with the details in [architecture.md](architecture.md#open-items):
-
-1. Anthropic's model agreements in prod, which an account administrator accepts by hand: Claude Sonnet 5's was
-   `NOT_AVAILABLE` there on 2026-10-21. dev's were accepted, and the organisation's region policy opened
-   ap-southeast-4, on 2026-10-15.
-2. The data-retention mode and its SCP, set by whoever administers the organisation's Bedrock settings.
-3. Where the managed knowledge base's embedding and reranking models run.
-4. Whether the budget backstop sees Claude's cost, which is billed through AWS Marketplace, and who subscribes to the
-   alerts topic.
-5. Whether a security review wants the WAF allowlist or the VPC endpoints.
+[deploy.md](deploy.md) has the steps.
 
 ## Sources
 

@@ -5,32 +5,23 @@ Version 1 lives under `https://sonar.<stage>.umccr.org/api/v1`. The OpenAPI cont
 
 ## Browsing the API
 
-Each stage serves its contract beside the API, as the OrcaBus services do, with no token:
-
-| Page                                                                                               | What it is                                                |
-| -------------------------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| [`https://sonar.dev.umccr.org/schema/swagger-ui/`](https://sonar.dev.umccr.org/schema/swagger-ui/) | Swagger UI: every endpoint, its request and its responses |
-| `https://sonar.<stage>.umccr.org/schema/openapi.json`                                              | the contract as JSON, for clients and code generators     |
-
-The served contract names one server, `/api/v1` on the same host, so "Try it out" calls the stage that served the
-page. To call an endpoint that needs a token, choose **Authorize** and paste an ID token from an allowed client;
-the page keeps it only until you close it. Swagger UI loads from jsDelivr at a pinned version, checked against its
-hashes, under a Content-Security-Policy that allows nothing else (`infrastructure/stage/api-docs.ts`).
+Each stage serves its contract beside the API, with no token: Swagger UI at `/schema/swagger-ui/`, as on
+[sonar.dev.umccr.org](https://sonar.dev.umccr.org/schema/swagger-ui/), and the contract as JSON at
+`/schema/openapi.json`, for clients and code generators. The served contract names one server, `/api/v1` on the same
+host, so "Try it out" calls the stage that served the page. For an endpoint that needs a token, choose **Authorize**
+and paste an ID token; the page keeps it only until you close it. Swagger UI loads from jsDelivr at a pinned version,
+checked against its hashes, under a Content-Security-Policy that allows nothing else.
 
 ## Authentication
 
-Send a Cognito ID token from the `data-portal-<stage>` pool, issued to an allowed app client, as
-`Authorization: Bearer <token>`. Two clients are allowed: the docs platform's `docs-app`, for the chat panel, and
-OrcaUI's app client, for portal.umccr.org and orcaui.umccr.org and their dev hosts. Beta also allows the dev pool's
-`localhost` client, for portal apps such as the OrcaSonar Console run on a developer's machine; their dev server
-proxies the calls, since CORS allows only the deployed hosts. A token from any other client, such as a machine token
-from the OrcaBus token service, gets `401`. `/health` and the
-API docs under `/schema/` need no token; API Gateway answers them itself, so no function runs without a token. A
-missing, expired or foreign token gets `401`; refresh it and retry once. In prod, the [audit log](#the-audit-log) also needs
-the token's `cognito:groups` to include the audit group, `admin`; in beta, for now, any accepted token reads it.
+Send a Cognito ID token from the `data-portal-<stage>` pool as `Authorization: Bearer <token>`, issued to an allowed
+app client: the docs platform's `docs-app`, OrcaUI's, or in beta the dev pool's `localhost` client, for portal apps
+run on a developer's machine, such as the OrcaSonar Console. CORS allows only deployed hosts, so a local app's dev
+server proxies its calls. A missing, expired or foreign token, such as a machine token from the OrcaBus token service,
+gets `401`: refresh it and retry once. `/health` and `/schema/` need no token.
 
-The authorizer passes on the reader's `sub`, client ID, email and groups. The email is kept only in the audit log,
-never in logs or records.
+The authorizer passes the reader's `sub`, client ID, email and groups to the functions; the email is kept only in
+the [audit log](#the-audit-log), which also needs the reader's group.
 
 ## Asking a question
 
@@ -45,12 +36,12 @@ Content-Type: application/json
 {"query": "How do I add a site to docs.umccr.org?", "sites": ["platform"]}
 ```
 
-| Field            | Meaning                                                                                                                   |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `query`          | the question, 1 to 2,000 characters                                                                                       |
-| `conversationId` | optional: the `conversationId` from an earlier answer, to ask a follow-up; it is searched for with the question before it |
-| `sites`          | optional: limit to these docs sites (slugs)                                                                               |
-| `mode`           | optional: `ask`, the only mode in release 1                                                                               |
+| Field            | Meaning                                                                 |
+| ---------------- | ----------------------------------------------------------------------- |
+| `query`          | the question, 1 to 2,000 characters                                     |
+| `conversationId` | optional: the `conversationId` of an earlier answer, to ask a follow-up |
+| `sites`          | optional: limit to these docs sites (slugs)                             |
+| `mode`           | optional: `ask`, the only mode in release 1                             |
 
 With `Accept: text/event-stream`, the answer streams as server-sent events, in this order:
 
@@ -68,20 +59,20 @@ event: done
 data: {"usage":{"inputTokens":4920,"outputTokens":388},"costUsd":0.0213}
 ```
 
-`delta` repeats. An `error` event (`{"code","message"}`) ends the stream early; keep what arrived and show the
-error. Without the `Accept` header, the response is one JSON object with `exchangeId`, `conversationId`, `answer`,
-`citations`, `usage` and `costUsd`. `costUsd` is what the answer cost in US dollars, as the reader's daily allowance
-counts it: the model's tokens, the guardrail's checks and the retrieval.
+`delta` repeats. An `error` event (`{"code","message"}`) ends the stream early: keep what arrived and show the error.
+Without the `Accept` header, the response is one JSON object with `exchangeId`, `conversationId`, `answer`,
+`citations`, `usage` and `costUsd`. `costUsd` is what the answer cost in US dollars, as the reader's allowance counts
+it: the model's tokens, the guardrail's checks and the retrieval.
 
-Deltas arrive in bursts. The guardrail checks the answer about 1,000 characters at a time before releasing them, so a
-short answer often arrives at once, several seconds after the question. A client that wants the answer to appear as
-it is written should pace the text itself.
+Deltas arrive in bursts. The guardrail checks the answer about 1,000 characters at a time before releasing it, so a
+short answer often arrives at once, several seconds after the question. A client that wants the answer to appear as it
+is written should pace the text itself.
 
-The answer is Markdown: paragraphs, lists, emphasis, code, links and now and then a small table. `[n]` in it cites
-the citation whose `ref` is n; citations are listed in the order the answer first cites them, so `ref` is not their
-position. Render the answer with a Markdown renderer that builds elements and passes no raw HTML through, or show it
-as text; never insert it into a page as HTML. Titles and snippets are plain text. Citation URLs point at
-`docs.umccr.org`; a client on another docs host (dev, stg) should rewrite the origin to its own.
+The answer is Markdown: paragraphs, lists, emphasis, code, links and now and then a small table. `[n]` cites the
+citation whose `ref` is n; citations are listed in the order the answer first cites them, so `ref` is not their
+position. Render the answer with a Markdown renderer that passes no raw HTML through, or show it as text; never insert
+it into a page as HTML. Titles and snippets are plain text. Citation URLs point at `docs.umccr.org`; a client on
+another docs host, such as `docs.dev.umccr.org`, should rewrite the origin to its own.
 
 ## Other endpoints
 
@@ -95,31 +86,29 @@ as text; never insert it into a page as HTML. Titles and snippets are plain text
 ## Your history
 
 A reader's own conversations from the last 30 days, so a chat panel can list them and show one again. The caller is
-the token's, never a parameter, so no one reads another reader's history. History holds the conversation and nothing
-the audit log adds about it: no email, client, cost, tokens or model. Questions that failed are left out, as they are
-from the turns a follow-up sends the model.
+always the token's, never a parameter, so no one reads another reader's history. History holds only what the reader
+saw: no email, client, cost, tokens or model. Questions that failed are left out.
 
 | Endpoint                             | Query                                      | Response                                                                                                                                                                                                |
 | ------------------------------------ | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `GET /chat/history`                  | `limit?` (1 to 100, default 50), `cursor?` | `{items: [{conversationId, title, startedAt, lastAt, questions}], nextCursor?}`, most recently active first; `title` is the conversation's first question                                               |
 | `GET /chat/history/{conversationId}` |                                            | `{conversationId, exchanges: [{exchangeId, at, question, sites?, answer, citations: [{ref, id, title, url, site, snippet, score}]}]}`, oldest first; `403` for another reader's, `404` for one it lacks |
 
-Citations are the ones the reader was shown, and `[n]` in a saved answer cites the citation whose `ref` is n, as in a
-live one; answers saved before the whole citation was kept cite `{id, url, score}` only. A conversation shows only the
-reader's own exchanges. To continue a conversation, send its `conversationId` with the next question to `POST /chat`.
-For the next page of the list, pass `nextCursor` as `cursor`. The cursor keeps the first page's window, but a page
-never reaches back past 30 days. Each conversation is listed once across the pages. A question asked before the first
-page is saved only once it is answered, up to five minutes later. If that makes a conversation the first page did not
-reach more recent, it is still listed where the first page would have put it. A conversation that first appears after
-the first page is on the next first page, as one started after it is.
+To continue a conversation, send its `conversationId` with the next question to `POST /chat`. Citations are the ones
+the reader was shown, numbered as the saved answer cites them; answers saved before whole citations were kept cite
+`{id, url, score}` only.
+
+For the next page, pass `nextCursor` as `cursor`. A cursor keeps the first page's window, never reaching back past 30
+days, and each conversation is listed once across the pages. A question is saved once it is answered, up to five
+minutes after it was asked; a conversation it makes more recent stays where the first page placed it, and one that
+first appears after the first page waits for the next first page.
 
 ## The audit log
 
-For administrators: who asked what, how it was answered, and what it cost, kept 30 days. Who may read it is
-`AUDIT_GROUP` in `infrastructure/stage/config.ts`. In prod, only members of the `admin` group in the
-`data-portal-prod` pool may, and anyone else gets `403 forbidden`. In beta it is `*` for now: any token the API
-accepts, as for chat and search. It holds answered, not-covered and failed exchanges. Requests refused before an
-answer started, over the budget or invalid, are not in it.
+For administrators: who asked what, how it was answered and what it cost, for the last 30 days. Who may read it is
+`AUDIT_GROUP` in `infrastructure/stage/config.ts`: in prod, members of the `admin` group in the `data-portal-prod`
+pool, and anyone else gets `403 forbidden`; in beta, for now, `*`, any token the API accepts. It holds answered,
+not-covered and failed exchanges, but not requests refused before an answer started, for the budget or as invalid.
 
 | Endpoint                                    | Query                                                                                                                | Response                                                                                                                                                                                                          |
 | ------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -128,22 +117,16 @@ answer started, over the budget or invalid, are not in it.
 | `GET /audit/conversations/{conversationId}` |                                                                                                                      | `{conversationId, exchanges: [...]}`, oldest first, each with its caller, the whole answer, its sources, model, tokens and cost; `404` for a conversation the audit log does not hold                             |
 | `GET /audit/usage`                          | `from?`, `to?`                                                                                                       | `{from, to, totals: {people, questions, costUsd}, callers: [{id, email, questions, answered, notCovered, failed, costUsd, inputTokens, outputTokens, lastAt}]}`, readers with the most questions first            |
 
-`from` and `to` are UTC dates or ISO times in UTC. A date alone is the start of that day for `from`, and its end for
-`to`. The window defaults to the week up to now, and can span at most 31 days. `answerPreview` is the answer's first
-280 characters; a failed exchange has its `errorCode` and no answer. For the next page, pass `nextCursor` as `cursor`
-with the same `caller`, `outcome` and `limit`. The cursor keeps the first page's window, so there is no need to pass
-`from` or `to` again.
+`from` and `to` are UTC dates or ISO times in UTC; a date alone is the start of that day for `from` and its end for
+`to`. The window defaults to the week up to now and spans at most 31 days. `answerPreview` is the answer's first 280
+characters; a failed exchange has its `errorCode` and no answer. For the next page, pass `nextCursor` as `cursor` with
+the same `caller`, `outcome` and `limit`; the cursor keeps the window.
 
-An exchange is one question and its answer (`x_…`). A conversation (`c_…`) is the exchanges one reader asked as
-follow-ups of each other: the first question starts it, and each follow-up sends its `conversationId`.
-`/audit/conversations` lists the window's conversations, most recently active first, a row for each caller in one, with
-what their exchanges in the window add up to. Only its owner can continue a conversation, so another caller's row in
-it holds follow-ups that were refused (`failed`, with `errorCode` `forbidden`), and never adds to the owner's. A
-conversation that began before the window counts only the exchanges inside it, and
-`/audit/conversations/{conversationId}` has all of it. There, `outcome` keeps the rows with at least one exchange that
-ended that way, and `total` counts every row that matches, across pages; paging lists each row once, as for history.
-Sources are the citations the reader was shown, from the day the whole citation was first kept; older ones carry
-`{id, url, score}`.
+`/audit/conversations` has a row for each caller in each conversation active in the window, most recently active
+first, adding up their exchanges in the window. Only its owner can continue a conversation, so another caller's row
+holds follow-ups refused as `forbidden`. A conversation that began before the window counts only the exchanges inside
+it; `/audit/conversations/{conversationId}` has all of it. `outcome` keeps the rows with at least one exchange that
+ended that way, and `total` counts every matching row across the pages.
 
 ```http
 GET /api/v1/audit/exchanges?caller=someone%40umccr.org&limit=20 HTTP/1.1
@@ -153,7 +136,7 @@ Authorization: Bearer eyJraWQiOi…
 
 ## Errors
 
-Every error has one shape: `{"error": {"code", "message", "retryAfter"?}}`, including those API Gateway returns
+Every error has one shape, `{"error": {"code", "message", "retryAfter"?}}`, including those API Gateway returns
 itself, such as for a missing token, a request WAF blocked, throttling or an unknown endpoint.
 
 | Status | `code`            | When                                                                                                                |
@@ -164,6 +147,7 @@ itself, such as for a missing token, a request WAF blocked, throttling or an unk
 | 404    | `not-found`       | no such document, conversation or endpoint                                                                          |
 | 429    | `over-budget`     | the caller's or the team's allowance for today is used; `Retry-After` gives the seconds until midnight in Melbourne |
 | 429    | `throttled`       | too many requests per second                                                                                        |
+| 500    | `internal`        | an unexpected error                                                                                                 |
 | 503    | `unavailable`     | Bedrock is throttling, the answer stopped early, or too many answers were starting at once                          |
 
 ## Limits

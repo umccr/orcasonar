@@ -1,84 +1,73 @@
 # Project
 
-What OrcaSonar is for, who uses it, what release 1 covers, where it stands and what is still open: the place to start
-for anyone joining the project, a person or a coding agent. [tech.md](tech.md) covers the stack and the conventions
-for changing the code, and [design.md](design.md) the decisions and the reasons for them.
+What OrcaSonar is for, who uses it, what release 1 covers, where it stands and what is still open. Start here;
+[tech.md](tech.md) covers the code and its conventions, and [design.md](design.md) the decisions behind it.
 
 ## What OrcaSonar is
 
 OrcaBus runs the pipelines and workflows, OrcaHouse holds the data, and OrcaSonar finds the knowledge and
-documentation behind them. A question goes down; passages and an answer come back, with links to where they came
-from.
+documentation behind them.
 
-Release 1 does one job: it answers questions about UMCCR's documentation in the chat panel on
-[docs.umccr.org](https://docs.umccr.org). A signed-in reader asks in the panel and gets a short answer that Claude
-writes from the matching passages, with numbered citations that link to their pages. Search returns the passages
-without writing an answer. Both go through one small API, `https://sonar.<stage>.umccr.org/api/v1`, described in
-[api.md](api.md).
+Release 1 answers questions about UMCCR's documentation in the chat panel on [docs.umccr.org](https://docs.umccr.org)
+and in OrcaUI. A signed-in reader asks, and Claude writes a short answer from the matching passages, with numbered
+citations that link to their pages. Search returns the passages without a model. Both go through one API,
+`https://sonar.<stage>.umccr.org/api/v1` ([api.md](api.md)).
 
-OrcaSonar answers only from the documentation it has indexed. When retrieval finds nothing, it says the documentation
-does not cover the question, and no model is called. A guardrail refuses medical advice about a person and requests
-for personal data about patients, and its grounding check flags answers the passages do not support.
+OrcaSonar answers only from what it has indexed: when retrieval finds nothing, it says so and calls no model. A
+guardrail refuses medical advice about a person and requests for personal data about patients, and its grounding
+check flags answers the passages do not support.
 
 ## Who uses it
 
-| Who                       | How                                                                                                                                                                                                                                                                                      |
-| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Readers of docs.umccr.org | People signed in to the docs site through the `data-portal-<stage>` Cognito pool. The chat panel sends their ID token, issued to the `docs-app` client. Each reader has a daily cap and their own conversations, and the panel tells them questions are kept 30 days to improve answers. |
-| The docs platform         | `umccr/docs-platform` builds docs.umccr.org and the chat panel. Each site's publish step exports its pages as Markdown, each with a metadata file, into OrcaSonar's ingest bucket as the `docs-publisher` role, the only writer.                                                         |
-| The platform team         | Deploys OrcaSonar through its two pipelines, answers its alarms, holds its budget, and reviews the records each week for the evaluation set.                                                                                                                                             |
-| Later callers             | Portal apps, a machine client, and AI agents through AgentCore Gateway. The design makes room for them; none is planned for a date.                                                                                                                                                      |
+| Who                       | How                                                                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Readers of docs.umccr.org | Signed in through the `data-portal-<stage>` Cognito pool; the chat panel sends their ID token. Each has a daily cap and their own history. |
+| OrcaUI users              | The same pool, through OrcaUI's app client, on portal.umccr.org and orcaui.umccr.org.                                                      |
+| The docs platform         | Each site's publish step exports its pages, with a metadata file each, into the ingest bucket as `docs-publisher`, the only writer.        |
+| The platform team         | Deploys OrcaSonar, answers its alarms, holds its budget, reads the audit log and reviews the records weekly for the evaluation set.        |
 
 ## Release 1, and what comes later
 
-|             | Release 1                                                                                                                            | Later, each when someone needs it                                                                                        |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| Callers     | the docs chat panel and OrcaUI: ID tokens from the `docs-app` and OrcaUI Cognito clients, and in beta the `localhost` client         | other portal apps; a machine client, and AgentCore Gateway to offer the API to AI agents as MCP tools                    |
-| Sources     | the UMCCR documentation docs.umccr.org exports, in one data source, `docs`                                                           | OrcaBus API docs, OrcaHouse schemas or tables, OrcaBus APIs: each its own data source or tool, with its own access rules |
-| Modes       | Ask, which answers with Claude, and Search, which returns passages without a model                                                   | Plan: Claude Sonnet 5 with agentic retrieval, at about three times the cost of Ask                                       |
-| Endpoints   | `/chat`, `/chat/history`, `/search`, `/documents/{id}`, `/feedback`; `/audit/*` for the audit group; `/health` and the API docs open | `/sources`, what is indexed and when it was synced; `/usage`, the caller's allowance left today                          |
-| Watching it | alarms on one alerts topic per stage, and the AWS Budgets backstop                                                                   | a Synthetics canary, and a deeper one once a machine client can call `/chat`                                             |
+|           | Release 1                                                                                                         | Later, when someone needs it                                                                   |
+| --------- | ----------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Callers   | the docs chat panel and OrcaUI; in beta, also the `localhost` client for portal apps run locally                  | other portal apps, a machine client, AgentCore Gateway offering the API to agents as MCP tools |
+| Sources   | the documentation docs.umccr.org exports, in one data source, `docs`                                              | OrcaBus API docs, OrcaHouse schemas, OrcaBus APIs, each with its own access rules              |
+| Modes     | Ask, answered by Claude; Search, passages without a model                                                         | Plan: Claude with agentic retrieval, at about three times the cost of Ask                      |
+| Endpoints | `/chat`, `/chat/history`, `/search`, `/documents/{id}`, `/feedback`, `/audit/*`; `/health` and the API docs, open | `/sources`, what is indexed; `/usage`, the caller's allowance left today                       |
+| Watching  | alarms on one alerts topic per stage, and the AWS Budgets backstop                                                | a Synthetics canary                                                                            |
 
 ## Where it fits
 
-| Repository                        | What OrcaSonar takes from it, or gives it                                                                                                                                                                                                                                                                                                                                                                                 |
-| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `umccr/docs-platform`             | The other side of the contract: the chat panel (`toolkit/src/umccr_docs/theme/assets/umccr/umccr.js`), the `export-kb` step that writes the documents and their metadata, the publish steps and the `docs-publisher` role. Its [ADR-0007](https://github.com/umccr/docs-platform/blob/main/docs/design/adr/0007-chat-through-orcasonar.md) records the decision to answer the chat through OrcaSonar.                     |
-| `umccr/infrastructure`            | The Cognito user pool and the `docs-app` client (`cognito_aai`, `app_docs.tf`), and each account's CDK bootstrap (`scripts/aws_bootstrap`).                                                                                                                                                                                                                                                                               |
-| `OrcaBus/platform-cdk-constructs` | Where UMCCR's account list, the SSM names of each account's certificate, hosted zone, user pool and OrcaUI client, and OrcaUI's hosts are kept. OrcaSonar no longer depends on the npm package: it keeps its own copy, taken from 1.9.11, in `infrastructure/shared/`, and follows changes there by hand. The pipeline construct here is adapted from its `DeploymentStackPipeline` so that nothing is named for OrcaBus. |
-| OrcaBus and OrcaHouse             | The family OrcaSonar is named after, and the likely next sources of knowledge.                                                                                                                                                                                                                                                                                                                                            |
+| Repository                        | What OrcaSonar takes from it, or gives it                                                                                                                                                           |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `umccr/docs-platform`             | The publish steps and the `docs-publisher` role. Its [ADR-0007](https://github.com/umccr/docs-platform/blob/main/docs/design/adr/0007-chat-through-orcasonar.md) chose to answer through OrcaSonar. |
+| `umccr/docs-toolkit`              | The chat panel (`src/umccr_docs/theme/assets/umccr/umccr.js`) and `export-kb`, which writes the documents and their metadata.                                                                       |
+| `umccr/infrastructure`            | The Cognito user pool and its app clients (`cognito_aai`), and each account's CDK bootstrap (`scripts/aws_bootstrap`).                                                                              |
+| `OrcaBus/platform-cdk-constructs` | UMCCR's accounts, shared SSM names and OrcaUI's hosts, copied from 1.9.11 into `infrastructure/shared/platform.ts` and followed by hand; the pipeline construct is adapted from it.                 |
 
-The interfaces between OrcaSonar and docs.umccr.org, from the ingest bucket to CORS, are listed in the
-[README](../README.md#contract-with-docsumccrorg). [tech.md](tech.md#change-these-together) lists what must change in
-both repositories at once.
+The interfaces with docs.umccr.org are in the [README](../README.md#contract-with-docsumccrorg), and what must change
+in both repositories at once is in [tech.md](tech.md#change-these-together).
 
 ## Principles
 
-Every change keeps to these. [design.md](design.md) has the reasons.
+Every change keeps to these; [design.md](design.md) has the reasons.
 
-1. **The data stays in Australia, under our own key.** Everything runs in ap-southeast-2, and everything OrcaSonar
-   stores, the index included, is encrypted with the Sonar KMS key. Answers come from Claude through the Australian
-   (`au.`) inference profiles, which run in Sydney and Melbourne only. The knowledge base reads only the ingest
-   bucket, and OrcaSonar calls nothing outside AWS.
-2. **No code of ours runs without a valid token.** WAF filters first, API Gateway answers the open routes (`/health`
-   and the API docs) itself, and every route that reaches a function needs the authorizer's approval. A stack test
-   fails if an open route reaches a Lambda.
-3. **Answers come from the documentation, with their sources.** With no passages there is no model call, and an
-   answer's citations link to the pages it used.
-4. **The budget counts dollars, not questions.** The month's budget is $50 in prod and $10 in beta. Before each answer
-   the chat function holds the most it can cost, and settles the hold at the real cost afterwards. A team allowance
-   per day and a cap of $0.40 a day per caller share the budget out, limits per request keep any one answer under
-   about 8 cents, and AWS Budgets is the backstop. Search keeps working when the allowance is spent.
-5. **Questions are kept 30 days, and never logged.** Each exchange is recorded for evaluation, then deleted after 30
-   days. Logs hold the caller's Cognito `sub` and the outcome, never the question, the answer or the email. The audit
-   log keeps the same 30 days with the reader's email, for the audit group only. The evaluation set keeps examples
-   without reader IDs.
-6. **The data outlives the API.** The stateful stack holds the key, the buckets, the table, the knowledge base and the
-   guardrail. The stateless stack holds everything that changes often, and can be replaced without touching the data
-   or the index.
-7. **People make the decisions that bind UMCCR.** A model's licence terms, the account's Bedrock data-retention mode
-   and who hears the alerts are decided by an administrator or the team, never by a deploy. The stacks cannot accept a
-   model agreement, and the chat role has no permission to.
+1. **The data stays in Australia, under our own key.** Everything runs in ap-southeast-2 and is encrypted with the
+   Sonar KMS key, the index included. Claude is called only through the `au.` inference profiles, which run in Sydney
+   and Melbourne. The knowledge base reads only the ingest bucket, and nothing outside AWS is called.
+2. **No code of ours runs without a valid token.** WAF filters first, API Gateway answers the open routes itself, and
+   every route that reaches a function needs the authorizer. A stack test fails if an open route reaches a Lambda.
+3. **Answers come from the documentation, with their sources.** No passages means no model call.
+4. **The budget counts dollars, not questions.** $50 a month in prod and $10 in beta, shared out by a team allowance
+   per day, a cap of $0.40 a day per caller and per-request limits that keep any answer under about 8 cents. AWS
+   Budgets is the backstop, and Search keeps working when the allowance is spent.
+5. **Questions are kept 30 days, and never logged.** Logs hold the caller's `sub` and the outcome, never the question,
+   the answer or the email. The audit log keeps the email for the audit group only.
+6. **The data outlives the API.** The stateful stack holds the key, buckets, table, knowledge base and guardrail; the
+   stateless stack holds everything else and can be replaced without touching them.
+7. **People make the decisions that bind UMCCR.** Model licence terms, Bedrock's data-retention mode and who hears the
+   alerts are decided by an administrator or the team, never by a deploy; the chat role has no AWS Marketplace
+   permissions.
 
 ## Stages
 
@@ -87,75 +76,60 @@ Every change keeps to these. [design.md](design.md) has the reasons.
 | beta  | dev     | `https://sonar.dev.umccr.org/api/v1`  | `docs.dev.umccr.org`                    | $10            |
 | prod  | prod    | `https://sonar.prod.umccr.org/api/v1` | `docs.umccr.org`, `docs.prod.umccr.org` | $50            |
 
-Two pipelines in the toolchain account, `UMCCR-OrcaSonarStateful` and `UMCCR-OrcaSonarStateless`, deploy one stack
-each: to beta, then to prod after the `PromoteToProd` approval. The stg account runs no OrcaSonar stage: it was
-dropped on 2026-10-21.
+Each stack's pipeline deploys to beta, then to prod after approval ([deploy.md](deploy.md)). There is no stg stage.
 
-## Where it stands, on 2026-10-21
+## Where it stands
 
-| Date       | Milestone                                                                                                                                                                                                                                                                                                           |
-| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-10-09 | Designed: [design.md](design.md).                                                                                                                                                                                                                                                                                   |
-| 2026-10-13 | The toolchain stacks and both pipelines deployed. In dev, the knowledge base and the guardrail created with the Sonar key, and the first ingestion jobs indexed `/platform/`'s documents.                                                                                                                           |
-| 2026-10-15 | The chat panel answers in dev, after three fixes: the organisation's region policy allows ap-southeast-4, an account administrator accepted the Claude model agreements, and the chat function no longer sends `temperature`.                                                                                       |
-| 2026-10-16 | The first release committed, on the branch `feat/orcasonar-initial`.                                                                                                                                                                                                                                                |
-| 2026-10-21 | The stg stage dropped. A pre-production review stopped a call Bedrock refuses from keeping its hold, made the writes after an answer best-effort, searched for follow-ups with the question before them, added alarms on failed answers, writes, 5XX responses and ingestion, and set four WAF body rules to count. |
+| Date       | Milestone                                                                                                                                                              |
+| ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-10-09 | Designed ([design.md](design.md)).                                                                                                                                     |
+| 2026-10-13 | The pipelines deployed; in dev, the knowledge base and guardrail created and the first documents indexed.                                                              |
+| 2026-10-15 | The chat panel answers in dev, once the region policy allowed ap-southeast-4, the Claude agreements were accepted and the chat function stopped sending `temperature`. |
+| 2026-10-21 | stg dropped; a pre-production review fixed holds, made writes after an answer best-effort, added alarms and set four WAF body rules to count.                          |
+| 2026-10-27 | The first release merged to `main` (pull request #2).                                                                                                                  |
+| 2026-10-29 | The audit log API (#3); OrcaUI as a caller, with UMCCR's platform names copied into this repository (#4).                                                              |
+| 2026-10-30 | `docs/` published at docs.umccr.org/orcasonar/ (#5).                                                                                                                   |
+| 2026-11-12 | Readers' chat history, audit conversations, and the `localhost` client in beta (#6).                                                                                   |
 
-Today:
-
-- **dev (beta)**: both stage stacks are deployed by hand from the branch, and the chat panel answers.
-- **prod**: nothing is deployed. A read-only check on 2026-10-21 found no OrcaSonar resources there, and Claude
-  Sonnet 5's agreement not yet accepted.
-- **The pipelines** exist, but GitHub's `main` holds only the empty initial commit, so they have nothing to deploy
-  until the branch is merged.
-
-Next is the first deploy to prod, so that pilot users can try the chat panel on docs.umccr.org and give feedback. The
-steps are in [deploy.md](deploy.md#step-7-prod); the open items below come first, or soon after.
+The accounts were last checked on 2026-10-21, before the merge to `main`. dev (beta) had both stage stacks, deployed
+by hand from the branch, and answered; prod had nothing deployed, and Claude Sonnet 5's agreement was not accepted.
+Each merge since starts the pipelines, so check both accounts before relying on this. Next is the first deploy to
+prod, for pilot users ([deploy.md](deploy.md#step-7-prod)), with the open items below first or soon after.
 
 ## Open items
 
-[architecture.md](architecture.md#open-items) has the details of each.
+[architecture.md](architecture.md#open-items) has the details.
 
-| Open item                                                                                                                                                                             | Where it is decided                                                                                             |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| An administrator of the prod account accepts the Claude model agreements: Sonnet 5's and Haiku 4.5's were `NOT_AVAILABLE` on 2026-10-21. Until then every answer fails; search works. | [deploy.md](deploy.md#model-access)                                                                             |
-| A team address or a Slack channel hears the alerts: nobody subscribes to the alerts topic yet.                                                                                        | `ALERT_EMAILS` in `infrastructure/stage/config.ts`, or the AWS Chatbot channel ([deploy.md](deploy.md#alerts))  |
-| An organisation administrator sets the accounts' Bedrock data-retention mode to `none`, with an SCP that keeps it there. It is `inherit` in dev.                                      | [deploy.md](deploy.md#data-retention)                                                                           |
-| Whether the budget backstop sees Claude's cost, which AWS Marketplace bills under the model's name rather than as Amazon Bedrock.                                                     | the `Budget` in `infrastructure/stage/stateless-stack.ts`                                                       |
-| `MIN_SCORE`, the score below which passages are left out of an answer, is tuned on real questions. No stack sets it, so it is 0 and every passage counts.                             | `app/src/config/env.ts`; set it in the chat function's environment in `infrastructure/stage/stateless-stack.ts` |
-| Whether the guardrail keeps masking email addresses and phone numbers in answers, the contacts the documentation publishes included.                                                  | the guardrail in `infrastructure/stage/stateful-stack.ts`                                                       |
-| The guardrail's grounding check is confirmed to stop an answer the passages do not support.                                                                                           | [architecture.md](architecture.md#open-items)                                                                   |
-| AWS says where the managed knowledge base's embedding and reranking models run, before anything sensitive is indexed.                                                                 | [design.md](design.md#keeping-the-data-on-our-side)                                                             |
-| A WAF allowlist of university and VPN ranges, or VPC endpoints for Bedrock, only if a security review asks.                                                                           | [design.md](design.md#keeping-the-data-on-our-side)                                                             |
+| Open item                                                                                                                            | Where it is decided                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------- |
+| An administrator accepts the Claude model agreements in prod. Until then every answer fails; search works.                           | [deploy.md](deploy.md#model-access)                            |
+| A team address or a Slack channel hears the alerts; nobody subscribes to the alerts topic yet.                                       | `ALERT_EMAILS`, or AWS Chatbot ([deploy.md](deploy.md#alerts)) |
+| An organisation administrator sets Bedrock's data-retention mode to `none`, with an SCP; it is `inherit` in dev.                     | [deploy.md](deploy.md#data-retention)                          |
+| Whether the budget backstop sees Claude's cost, which AWS Marketplace bills under the model's name.                                  | the `Budget` in `stateless-stack.ts`                           |
+| `MIN_SCORE`, below which passages are left out, is tuned on real questions; unset, every passage counts.                             | the chat function's environment                                |
+| Whether the guardrail keeps masking email addresses and phone numbers, the contacts the docs publish included.                       | the guardrail in `stateful-stack.ts`                           |
+| The grounding check is confirmed to stop an answer the passages do not support.                                                      | [architecture.md](architecture.md#open-items)                  |
+| The chat panel's notice says administrators can review questions with the reader's email, before the audit log reaches prod readers. | `umccr/docs-toolkit`                                           |
+| Beta's audit log returns to the `admin` group before readers outside the platform team use beta.                                     | `AUDIT_GROUP` in `config.ts`                                   |
+| AWS says where the managed knowledge base's embedding and reranking models run, before anything sensitive is indexed.                | [design.md](design.md#keeping-the-data-on-our-side)            |
+| A WAF allowlist of university and VPN ranges, or VPC endpoints for Bedrock, only if a security review asks.                          | [design.md](design.md#keeping-the-data-on-our-side)            |
 
 ## Vocabulary
 
-| Term                | Meaning                                                                                                                                     |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| reader              | a person asking through the chat panel                                                                                                      |
-| caller              | whoever a request's token belongs to: a reader's Cognito `sub`, or later a machine client's ID. Caps and conversations are per caller       |
-| site, slug          | one docs site on docs.umccr.org, such as `platform`; its documents are under `docs/<slug>/` in the ingest bucket                            |
-| `doc_id`            | a page's ID, `<slug>:<path>`, such as `platform:onboarding`: the same in the page's metadata, in citations and in `/documents/{id}`         |
-| passage             | a piece of a page that retrieval returns, with its page's `doc_id`, `title`, `url` and `site`                                               |
-| citation            | a passage the answer cites: `[n]` in the answer is the citation whose `ref` is n                                                            |
-| exchange            | one question and its answer, `x_` and 32 hex characters; its record is kept 30 days                                                         |
-| conversation, turn  | exchanges that follow one another, `c_` and 32 hex characters; each turn is kept 30 days, and the last six go to the model with a follow-up |
-| Ask, Search, Plan   | Ask answers with Claude; Search returns passages without a model; Plan is a later mode                                                      |
-| hold, settle        | the $0.10 held against the budget before an answer, and replacing it with what the answer cost                                              |
-| allowance, cap      | what the team may spend today, the month's budget left over the days left; and what one caller may spend today, $0.40                       |
-| stale mark          | the note in the table that documents changed since the index was last brought up to date                                                    |
-| beta, prod          | the stages; beta runs in the dev account                                                                                                    |
-| stateful, stateless | the two stacks in each stage: the data, and everything else                                                                                 |
-| alerts topic        | the SNS topic that every alarm and the budget's notices go to                                                                               |
-
-## Where to read more
-
-| Page                               | For                                                                                   |
-| ---------------------------------- | ------------------------------------------------------------------------------------- |
-| [README](../README.md)             | the overview, the endpoints, the contract with docs.umccr.org and the `make` commands |
-| [tech.md](tech.md)                 | the stack, how the code is laid out, and the conventions for changing it              |
-| [design.md](design.md)             | the decisions, with their diagrams, costs and reasons                                 |
-| [architecture.md](architecture.md) | what is deployed, component by component, and the open items                          |
-| [api.md](api.md)                   | the API: requests, the stream, errors and limits                                      |
-| [deploy.md](deploy.md)             | deploying, the manual steps in each account, and troubleshooting                      |
-| [runbook.md](runbook.md)           | alarms, the budget, changing the model or the guardrail, the index, and the records   |
+| Term                | Meaning                                                                                                            |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| reader              | a person asking through the chat panel                                                                             |
+| caller              | whoever a token belongs to: a reader's Cognito `sub`, later a machine client's ID; caps are per caller             |
+| site, slug          | one docs site, such as `platform`; its documents are under `docs/<slug>/` in the ingest bucket                     |
+| `doc_id`            | a page's ID, `<slug>:<path>`, such as `platform:onboarding`, the same in metadata, citations and `/documents/{id}` |
+| passage             | a piece of a page that retrieval returns, with its page's `doc_id`, `title`, `url` and `site`                      |
+| citation            | a passage the answer cites: `[n]` in the answer is the citation whose `ref` is n                                   |
+| exchange            | one question and its answer, `x_` and 32 hex characters                                                            |
+| conversation, turn  | exchanges that follow one another, `c_` and 32 hex characters; the last six turns go to the model                  |
+| Ask, Search, Plan   | Ask answers with Claude; Search returns passages without a model; Plan is a later mode                             |
+| hold, settle        | the $0.10 held against the budget before an answer, and replacing it with what the answer cost                     |
+| allowance, cap      | what the team may spend today, the month's budget left over the days left; what one caller may spend, $0.40        |
+| stale mark          | the note in the table that documents changed since the index was last brought up to date                           |
+| beta, prod          | the stages; beta runs in the dev account                                                                           |
+| stateful, stateless | the two stacks in each stage: the data, and everything else                                                        |
+| alerts topic        | the SNS topic that every alarm and the budget's notices go to                                                      |
