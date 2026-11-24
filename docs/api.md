@@ -38,7 +38,7 @@ Content-Type: application/json
 
 | Field            | Meaning                                                                 |
 | ---------------- | ----------------------------------------------------------------------- |
-| `query`          | the question, 1 to 2,000 characters                                     |
+| `query`          | the question, 1 to 1,000 characters                                     |
 | `conversationId` | optional: the `conversationId` of an earlier answer, to ask a follow-up |
 | `sites`          | optional: limit to these docs sites (slugs)                             |
 | `mode`           | optional: `ask`, the only mode in release 1                             |
@@ -67,6 +67,9 @@ it: the model's tokens, the guardrail's checks and the retrieval.
 Deltas arrive in bursts. The guardrail checks the answer about 1,000 characters at a time before releasing it, so a
 short answer often arrives at once, several seconds after the question. A client that wants the answer to appear as it
 is written should pace the text itself.
+
+The [guardrail](guardrail.md) can refuse the question, or replace the answer, with its own message and no citations.
+It masks email addresses and phone numbers in an answer as `{EMAIL}` and `{PHONE}`; the answer keeps its citations.
 
 The answer is Markdown: paragraphs, lists, emphasis, code, links and now and then a small table. `[n]` cites the
 citation whose `ref` is n; citations are listed in the order the answer first cites them, so `ref` is not their
@@ -120,7 +123,8 @@ not-covered and failed exchanges, but not requests refused before an answer star
 `from` and `to` are UTC dates or ISO times in UTC; a date alone is the start of that day for `from` and its end for
 `to`. The window defaults to the week up to now and spans at most 31 days. `answerPreview` is the answer's first 280
 characters; a failed exchange has its `errorCode` and no answer. For the next page, pass `nextCursor` as `cursor` with
-the same `caller`, `outcome` and `limit`; the cursor keeps the window.
+the same `caller`, `outcome` and `limit`; the cursor keeps the window. `guardrail` is `intervened`, `masked` or `none`
+([guardrail.md](guardrail.md#how-it-works)); `guardrailInterventions` counts `intervened` only.
 
 `/audit/conversations` has a row for each caller in each conversation active in the window, most recently active
 first, adding up their exchanges in the window. Only its owner can continue a conversation, so another caller's row
@@ -154,7 +158,7 @@ itself, such as for a missing token, a request WAF blocked, throttling or an unk
 
 | Limit                | Value                                                              |
 | -------------------- | ------------------------------------------------------------------ |
-| Question length      | 2,000 characters                                                   |
+| Question length      | 1,000 characters for `/chat`, 2,000 for `/search`                  |
 | Conversation history | the last 6 turns                                                   |
 | Passages per answer  | 8                                                                  |
 | Answer length        | 1,000 output tokens                                                |

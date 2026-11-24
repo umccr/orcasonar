@@ -1,5 +1,5 @@
 import { errorDetail } from '../lib/errors';
-import type { Answerer } from './answer';
+import type { Answerer, GuardrailOutcome } from './answer';
 import { MAX_ANSWER_TOKENS } from './answer';
 import type { Budget, Hold } from './budget';
 import type { Usage } from './pricing';
@@ -117,7 +117,7 @@ export const answerQuestion = async (
 
     let answer = '';
     let usage: Usage = { inputTokens: 0, outputTokens: 0 };
-    let guardrail: 'none' | 'intervened' = 'none';
+    let guardrail: GuardrailOutcome = 'none';
     let modelCalled = false;
 
     if (passages.length === 0) {
@@ -137,8 +137,10 @@ export const answerQuestion = async (
           await emit({ event: 'delta', data: { text: part.text } });
         } else if (part.type === 'usage') {
           usage = part.usage;
-        } else {
+        } else if (part.action === 'blocked') {
           guardrail = 'intervened';
+        } else if (guardrail === 'none') {
+          guardrail = 'masked';
         }
       }
     }
@@ -153,7 +155,9 @@ export const answerQuestion = async (
     });
     await settle(costUsd);
 
-    const cited = modelCalled && guardrail === 'none' ? citedPassages(answer, passages) : [];
+    // A blocked answer is the guardrail's message, which cites nothing. A masked one is still the model's answer from
+    // the passages, so it keeps its sources.
+    const cited = modelCalled && guardrail !== 'intervened' ? citedPassages(answer, passages) : [];
     // Numbered as the answer cites them, `[n]` for the nth passage, rather than in the order they are listed.
     const citations = cited.map((passage) => toCitation(passage, passages.indexOf(passage) + 1));
     await emit({ event: 'citations', data: citations });

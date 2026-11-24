@@ -298,7 +298,8 @@ export class OrcaSonarStatefulStack extends Stack {
 
   /**
    * Applied to every model call: topics to refuse, masking of personal data in answers, and a grounding check that
-   * flags answers the retrieved passages do not support.
+   * flags answers the retrieved passages do not support. The chat function marks the question as guard content too, so
+   * the topics and the personal-data filters check it as well as the answer; the passages get the grounding check only.
    */
   private guardrail(props: OrcaSonarStatefulStackProps, key: Key) {
     const policies = {
@@ -326,9 +327,11 @@ export class OrcaSonarStatefulStack extends Stack {
         ],
       },
       sensitiveInformationPolicyConfig: {
+        // Emails and phone numbers are masked in answers only: a question that names a contact reaches the model as it
+        // was asked, rather than with `{EMAIL}` in its place. Keys and passwords are refused either way.
         piiEntitiesConfig: [
-          { type: 'EMAIL', action: 'ANONYMIZE' },
-          { type: 'PHONE', action: 'ANONYMIZE' },
+          { type: 'EMAIL', action: 'ANONYMIZE', inputEnabled: false },
+          { type: 'PHONE', action: 'ANONYMIZE', inputEnabled: false },
           { type: 'AWS_ACCESS_KEY', action: 'BLOCK' },
           { type: 'AWS_SECRET_KEY', action: 'BLOCK' },
           { type: 'PASSWORD', action: 'BLOCK' },

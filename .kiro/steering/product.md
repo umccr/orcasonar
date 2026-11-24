@@ -11,16 +11,17 @@ goes through one API, `https://sonar.<stage>.umccr.org/api/v1`.
 
 The full picture is in `docs/`. Read the page that covers the area before changing it:
 
-| Page                      | For                                                                         |
-| ------------------------- | --------------------------------------------------------------------------- |
-| `docs/project.md`         | purpose, callers, release 1 scope, status, open items, vocabulary           |
-| `docs/tech.md`            | stack, layout, conventions, "change these together", deliberate oddities    |
-| `docs/design.md`          | decisions, diagrams, costs and the reasons for them                         |
-| `docs/architecture.md`    | each deployed component, the request flow, ingestion, budget, privacy       |
-| `docs/api.md`             | requests, the event stream, errors and limits                               |
-| `docs/deploy.md`          | deploying, manual steps per account, troubleshooting                        |
-| `docs/runbook.md`         | alarms, the budget, changing the model or guardrail, the index, the records |
-| `app/schema/openapi.yaml` | the API contract                                                            |
+| Page                      | For                                                                      |
+| ------------------------- | ------------------------------------------------------------------------ |
+| `docs/project.md`         | purpose, callers, release 1 scope, status, open items, vocabulary        |
+| `docs/tech.md`            | stack, layout, conventions, "change these together", deliberate oddities |
+| `docs/design.md`          | decisions, diagrams, costs and the reasons for them                      |
+| `docs/architecture.md`    | each deployed component, the request flow, ingestion, budget, privacy    |
+| `docs/guardrail.md`       | what the guardrail checks, how, its limits, changing and testing it      |
+| `docs/api.md`             | requests, the event stream, errors and limits                            |
+| `docs/deploy.md`          | deploying, manual steps per account, troubleshooting                     |
+| `docs/runbook.md`         | alarms, the budget, changing the model, the index, the records           |
+| `app/schema/openapi.yaml` | the API contract                                                         |
 
 ## Principles every change keeps
 

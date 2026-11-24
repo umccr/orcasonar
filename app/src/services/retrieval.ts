@@ -24,7 +24,10 @@ export interface Retriever {
 /** Passages for the answer: this many from the reranked, hybrid search. */
 export const ANSWER_PASSAGES = 8;
 
-/** The longest question the API takes, and so the longest query retrieval is sent. */
+/**
+ * The longest query Search takes, and so the longest query retrieval is sent. A question to `/chat` is shorter
+ * (`MAX_CHAT_QUESTION_CHARACTERS`), which leaves room for the question before it in a follow-up's query.
+ */
 export const MAX_QUESTION_CHARACTERS = 2000;
 
 /**

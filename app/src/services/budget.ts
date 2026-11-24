@@ -82,7 +82,7 @@ export const spendKeys = (callerId: string, now: Date): SpendKeys => {
 
 /**
  * What an answer is held at until its cost is known: more than the most expensive answer the per-request limits allow,
- * about 8 cents (2,000 characters of question, six turns of history, eight passages and 1,000 output tokens).
+ * about 8 cents (1,000 characters of question, six turns of history, eight passages and 1,000 output tokens).
  */
 export const ANSWER_HOLD_USD = 0.1;
 

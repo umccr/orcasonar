@@ -9,8 +9,19 @@ export type AnswerEvent =
   | { readonly type: 'started' }
   | { readonly type: 'delta'; readonly text: string }
   | { readonly type: 'usage'; readonly usage: Usage }
-  /** The guardrail replaced or stopped the answer. */
-  | { readonly type: 'guardrail' };
+  /**
+   * The guardrail intervened: `blocked` when it refused the question or replaced the answer with its blocked message,
+   * `masked` when it only masked values, such as an email address, in an answer that otherwise stands.
+   */
+  | { readonly type: 'guardrail'; readonly action: GuardrailAction };
+
+export type GuardrailAction = 'blocked' | 'masked';
+
+/**
+ * What the guardrail did to an answer, as the records and the audit log keep it: `intervened` when it blocked one,
+ * `masked` when it only masked values in it.
+ */
+export type GuardrailOutcome = 'none' | 'masked' | 'intervened';
 
 export interface AnswerRequest {
   readonly system: string;

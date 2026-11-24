@@ -32,7 +32,7 @@ The CDK app is CommonJS, run by ts-node, and tested with Jest and cdk-nag. Run `
   Every Lambda integration has the authorizer. The test "reaches a function only through the authorizer" enforces it.
 - **API Gateway's own errors** are gateway responses in the API's error shape, with CORS headers.
 - **The guardrail is versioned by its policies' hash.** A policy change publishes a new version and writes it to
-  `/orcasonar/guardrail-version`. Replaced versions are kept until the runbook's clean-up.
+  `/orcasonar/guardrail-version`. Replaced versions are kept until the clean-up in `docs/guardrail.md`.
 - **The chat role may call only the allowed models**: the `ALLOWED_MODEL_IDS` profiles and the models behind them in
   `MODEL_REGIONS`. The stack refuses an `ANSWER_MODEL_ID` not in that list. The chat role has no Marketplace
   permissions.

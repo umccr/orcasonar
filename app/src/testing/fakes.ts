@@ -1,6 +1,6 @@
 import type { AppDeps } from '../app';
 import { ApiError, invalidRequest } from '../lib/errors';
-import type { AnswerEvent, AnswerRequest, Answerer } from '../services/answer';
+import type { AnswerEvent, AnswerRequest, Answerer, GuardrailAction } from '../services/answer';
 import type { BudgetLimits, OverBudget, Spend, SpendKeys, SpendStore } from '../services/budget';
 import { Budget } from '../services/budget';
 import type { Turn } from '../services/prompt';
@@ -166,7 +166,10 @@ export class StaticRetriever implements Retriever {
   }
 }
 
-/** Streams a fixed answer in a few pieces, then reports usage. */
+/**
+ * Streams a fixed answer in a few pieces, then reports usage, and then what the guardrail did, if anything, as Bedrock's
+ * trace reports it once the answer ends.
+ */
 export class ScriptedAnswerer implements Answerer {
   readonly modelId = 'au.anthropic.claude-sonnet-5';
   readonly requests: AnswerRequest[] = [];
@@ -174,7 +177,7 @@ export class ScriptedAnswerer implements Answerer {
   constructor(
     private readonly answer = 'Add one entry to the site registry [1], then push your docs [2].',
     private readonly usage = { inputTokens: 4920, outputTokens: 388 },
-    private readonly guardrail = false
+    private readonly guardrail?: GuardrailAction
   ) {}
 
   async *stream(request: AnswerRequest): AsyncIterable<AnswerEvent> {
@@ -183,10 +186,10 @@ export class ScriptedAnswerer implements Answerer {
     for (const piece of this.answer.match(/.{1,16}/g) ?? []) {
       yield { type: 'delta', text: piece };
     }
-    if (this.guardrail) {
-      yield { type: 'guardrail' };
-    }
     yield { type: 'usage', usage: this.usage };
+    if (this.guardrail) {
+      yield { type: 'guardrail', action: this.guardrail };
+    }
   }
 }
 

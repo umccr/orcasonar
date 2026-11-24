@@ -43,6 +43,9 @@ The app is ES modules, bundled by esbuild into six Lambdas, and tested with Vite
 - **IDs** are `c_` (conversation) and `x_` (exchange) plus 32 hex characters (`lib/ids.ts`); requests are checked
   against that pattern.
 - **`ConverseStream` gets no `temperature`** or other sampling parameter: Claude Sonnet 5 refuses it.
+- **The guardrail checks the question** and the answer (`docs/guardrail.md`). `/chat` takes 1,000 characters at
+  most: the grounding check refuses a longer query. The trace tells a masked answer from a blocked one, and holds the
+  unmasked values: never log or keep it.
 - **Spend is read with three consistent `GetItem` calls**, not a batch: a throttled batch can drop counters and read
   as nothing spent.
 - **`/documents/{id}` does not decode its ID**: Hono already has.

@@ -14,7 +14,7 @@ citations that link to their pages. Search returns the passages without a model.
 `https://sonar.<stage>.umccr.org/api/v1` ([api.md](api.md)).
 
 OrcaSonar answers only from what it has indexed: when retrieval finds nothing, it says so and calls no model. A
-guardrail refuses medical advice about a person and requests for personal data about patients, and its grounding
+[guardrail](guardrail.md) refuses medical advice about a person and requests for personal data about patients, and its grounding
 check flags answers the passages do not support.
 
 ## Who uses it
@@ -107,8 +107,8 @@ prod, for pilot users ([deploy.md](deploy.md#step-7-prod)), with the open items 
 | An organisation administrator sets Bedrock's data-retention mode to `none`, with an SCP; it is `inherit` in dev.                     | [deploy.md](deploy.md#data-retention)                          |
 | Whether the budget backstop sees Claude's cost, which AWS Marketplace bills under the model's name.                                  | the `Budget` in `stateless-stack.ts`                           |
 | `MIN_SCORE`, below which passages are left out, is tuned on real questions; unset, every passage counts.                             | the chat function's environment                                |
-| Whether the guardrail keeps masking email addresses and phone numbers, the contacts the docs publish included.                       | the guardrail in `stateful-stack.ts`                           |
-| The grounding check is confirmed to stop an answer the passages do not support.                                                      | [architecture.md](architecture.md#open-items)                  |
+| Whether the guardrail keeps masking email addresses and phone numbers in answers, the contacts the docs publish included.            | [guardrail.md](guardrail.md#open-items)                        |
+| The grounding check is confirmed to stop an answer the passages do not support.                                                      | [guardrail.md](guardrail.md#open-items)                        |
 | The chat panel's notice says administrators can review questions with the reader's email, before the audit log reaches prod readers. | `umccr/docs-toolkit`                                           |
 | Beta's audit log returns to the `admin` group before readers outside the platform team use beta.                                     | `AUDIT_GROUP` in `config.ts`                                   |
 | AWS says where the managed knowledge base's embedding and reranking models run, before anything sensitive is indexed.                | [design.md](design.md#keeping-the-data-on-our-side)            |
