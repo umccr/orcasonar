@@ -503,7 +503,7 @@ approve the stateful pipeline's prod stage first. Changes that need care:
 - **A table index**: CloudFormation moves on without waiting for a new index, so approve the stateless pipeline's prod
   stage only once it is `ACTIVE`:
   `aws dynamodb describe-table --table-name OrcaSonarTable-prod --query 'Table.GlobalSecondaryIndexes[].[IndexName,IndexStatus]'`.
-- **The guardrail** and **models**: follow the runbook ([guardrail](runbook.md#change-the-guardrail),
+- **The guardrail** and **models**: follow the runbook ([guardrail](guardrail.md#change-the-guardrail),
   [models](runbook.md#move-to-another-claude-model)).
 
 ## Verification checklist

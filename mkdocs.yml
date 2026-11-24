@@ -24,6 +24,7 @@ nav:
   - Project: index.md
   - Design: design.md
   - Architecture: architecture.md
+  - Guardrail: guardrail.md
   - API: api.md
   - Tech stack: tech.md
   - Deploying: deploy.md

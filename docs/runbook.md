@@ -101,19 +101,7 @@ question gets "I couldn't find this in UMCCR's documentation".
 
 ## Change the guardrail
 
-The guardrail's policies are in `infrastructure/stage/stateful-stack.ts`. A change publishes a new guardrail version
-through the stateful pipeline and writes its number to `/orcasonar/guardrail-version`. Chat functions read that
-parameter every five minutes, so they move to the new version without a deploy of the stateless stack.
-
-The replaced version is kept: running functions use it until they read the parameter again, and the stateless stack
-names it as their fallback until its next deploy. So start the stateless pipeline once the stateful one has deployed
-the change. Old versions count towards the guardrail's quota of versions: once the stateless stack has deployed,
-delete them. The guardrail's ID is in `/orcasonar/guardrail-id`:
-
-```sh
-aws bedrock list-guardrails --guardrail-identifier <id> --query 'guardrails[].version'
-aws bedrock delete-guardrail --guardrail-identifier <id> --guardrail-version <old version>
-```
+Follow [guardrail.md](guardrail.md#change-the-guardrail).
 
 ## Remove a site's documents
 

@@ -18,7 +18,7 @@ What runs in each stage, component by component, and how a question, ingestion, 
 | Sonar KMS key          | stateful  | Encrypts the buckets, the table, the guardrail and the knowledge base's index. Rotated yearly.                                                                                                                                                             |
 | Ingest bucket          | stateful  | The knowledge base's only input. Only the docs platform's `docs-publisher` role writes, and only under `docs/`. Versioned, with replaced versions kept 30 days.                                                                                            |
 | Managed knowledge base | stateful  | AWS-managed vector store, embeddings, hybrid search and reranker. One data source, `docs`, on the ingest bucket's `docs/` prefix.                                                                                                                          |
-| Guardrail              | stateful  | Checks questions and answers for denied topics (medical advice about a person, personal data about patients) and AWS keys and passwords; masks emails and phone numbers in answers; checks answers' grounding in the retrieved passages.                   |
+| Guardrail              | stateful  | Denied topics, AWS keys and passwords, masking of emails and phone numbers in answers, and a grounding check ([guardrail.md](guardrail.md)).                                                                                                               |
 | Records bucket         | stateful  | One JSON record per exchange under `records/`, and feedback under `feedback/`, deleted after 30 days. `eval-set/` is kept.                                                                                                                                 |
 | DynamoDB table         | stateful  | Spend counters, conversation turns, the audit log (with an index by time and one by caller) and the ingestion state, with point-in-time recovery.                                                                                                          |
 
@@ -35,11 +35,8 @@ stateful resources through SSM parameters under `/orcasonar/`.
    eight passages, filtered on `site` when the question is limited to sites. A follow-up such as "and in prod?" names
    little to search for, so it is searched for with the question before it.
 4. With no passages, it says the documentation does not cover the question, without calling the model.
-5. Otherwise it calls Claude through `ConverseStream` with the guardrail, the passages as the grounding source and the
-   question as the query, which the denied topics and the personal-data filters check too. A question the guardrail
-   refuses gets its message without the model being called. Each piece of the answer streams as a `delta` event. The
-   guardrail's trace, which comes with the usage, tells an answer it blocked, which lists no citations, from one it only
-   masked, which keeps them.
+5. Otherwise it calls Claude through `ConverseStream` with the [guardrail](guardrail.md), the passages as the grounding
+   source and the question as the query, and streams each piece of the answer as a `delta` event.
 6. It prices the exchange from the tokens used, settles the hold at that cost, and sends `citations`, the passages the
    answer cites. It saves the turn, the record and the audit entry, then sends `done` with the usage and cost. A write
    that fails is logged as `write-error` and raises an alarm, but cannot fail an answer the reader already has.
@@ -122,8 +119,6 @@ The details behind [project.md](project.md#open-items)'s list, where it needs th
 
 - **Model access in prod.** Confirm the profile IDs there with `aws bedrock list-inference-profiles`; they were
   confirmed in dev on 2026-10-12.
-- **The guardrail.** Answers stream with it in sync mode (dev, 2026-10-15). Confirm that its grounding check stops an
-  answer the passages do not support.
 - **The budget backstop** filters on the service `Amazon Bedrock`, but Anthropic's models are billed through AWS
   Marketplace under their own names. Check where the first answers' cost appears in Cost Explorer, and filter on that;
   AWS Budgets can filter on Bedrock's model and provider since October 2026.

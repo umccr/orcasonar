@@ -18,9 +18,10 @@ fileMatchPattern: 'docs/**'
   | `tech.md`         | stack, layout, code conventions, "change these together", deliberate oddities |
   | `design.md`       | decisions and their reasons, diagrams, costs                                  |
   | `architecture.md` | deployed components, request flow, ingestion, budget, privacy, open items     |
+  | `guardrail.md`    | the guardrail: what it checks, how, limits, changing and testing it           |
   | `api.md`          | the API as a client sees it; kept in step with `app/schema/openapi.yaml`      |
   | `deploy.md`       | deploying and manual account steps, troubleshooting                           |
-  | `runbook.md`      | operating: alarms, budget, model and guardrail changes, the index, records    |
+  | `runbook.md`      | operating: alarms, budget, model changes, the index, records                  |
 
 - Use the vocabulary in `project.md` (reader, caller, exchange, conversation, hold, settle, allowance, cap).
 - Never paste account IDs, ARNs, bucket names, tokens or a person's email address into a page.

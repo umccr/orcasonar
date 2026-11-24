@@ -41,10 +41,11 @@ Every route but `/health` and the API docs needs a Cognito ID token from an allo
 | [project.md](docs/project.md)           | purpose, callers, scope, status, open items, vocabulary |
 | [design.md](docs/design.md)             | decisions and their reasons, diagrams, costs            |
 | [architecture.md](docs/architecture.md) | what is deployed, the request flow, budget, privacy     |
+| [guardrail.md](docs/guardrail.md)       | what the guardrail checks, how, and testing it          |
 | [api.md](docs/api.md)                   | requests, the event stream, errors and limits           |
 | [tech.md](docs/tech.md)                 | the stack, the layout, conventions for changing it      |
 | [deploy.md](docs/deploy.md)             | deploying, manual steps per account, troubleshooting    |
-| [runbook.md](docs/runbook.md)           | alarms, the budget, the model, the guardrail, the index |
+| [runbook.md](docs/runbook.md)           | alarms, the budget, the model, the index                |
 
 ## Contract with docs.umccr.org
 

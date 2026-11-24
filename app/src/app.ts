@@ -78,7 +78,10 @@ const ChatBody = z.object({
     .string()
     .trim()
     .min(1)
-    .max(MAX_CHAT_QUESTION_CHARACTERS, 'ask in 1,000 characters or fewer, or use Search.'),
+    .max(
+      MAX_CHAT_QUESTION_CHARACTERS,
+      `ask in ${MAX_CHAT_QUESTION_CHARACTERS.toLocaleString('en')} characters or fewer, or use Search.`
+    ),
   conversationId: ConversationId.optional(),
   sites: Sites,
   mode: z.enum(['ask']).default('ask'),
